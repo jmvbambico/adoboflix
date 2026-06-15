@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AdoboFlix - Netflix Style</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #0f0f0f 0%, #1a1a1a 100%);
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+
+        .app-container {
+            display: flex;
+            min-height: 100vh;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 280px;
+            background: rgba(20, 20, 20, 0.8);
+            backdrop-filter: blur(20px);
+            border-right: 1px solid rgba(240, 185, 11, 0.2);
+            padding: 20px;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            z-index: 100;
+            transition: all 0.3s ease;
+        }
+
+        .logo {
+            font-size: 28px;
+            font-weight: 800;
+            color: #f0b90b;
+            margin-bottom: 30px;
+            text-align: center;
+            text-shadow: 0 0 20px rgba(240, 185, 11, 0.5);
+        }
+
+        .search-container {
+            position: relative;
+            margin-bottom: 30px;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            color: white;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #f0b90b;
+            background: rgba(240, 185, 11, 0.1);
+            box-shadow: 0 0 20px rgba(240, 185, 11, 0.3);
+        }
+
+        .filter-section {
+            margin-bottom: 25px;
+        }
+
+        .filter-title {
+            font-weight: 600;
+            margin-bottom: 12px;
+            font-size: 16px;
+            color: #f0b90b;
+        }
+
+        .filter-option {
+            padding: 8px 12px;
+            margin: 4px 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 14px;
+        }
+
+        .filter-option:hover, .filter-option.active {
+            background: rgba(240, 185, 11, 0.2);
+            transform: translateX(5px);
+        }
+
+        /* Main Content */
+        .main-content {
+            margin-left: 280px;
+            flex: 1;
+            min-height: 100vh;
+        }
+
+        /* Hero Section */
+        .hero-section {
+            height: 75vh;
+            background: linear-gradient(45deg, rgba(0,0,0,0.7), rgba(0,0,0,0.3)),
+                        url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTkyMCIgaGVpZ2h0PSIxMDgwIiB2aWV3Qm94PSIwIDAgMTkyMCAxMDgwIiBmaWxsPSJub25lIiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPgo8ZGVmcz4KPHN0eWxlPi5hIHsgZmlsbDogIzJkM2E0Yjt9IC5iIHsgZmlsbDogIzM0NGU0ZDt9PC9zdHlsZT4KPC9kZWZzPgo8cmVjdCB3aWR0aD0iMTkyMCIgaGVpZ2h0PSIxMDgwIiBmaWxsPSIjMjEyMTIxIi8+CjxyZWN0IHg9IjQwMCIgeT0iMjAwIiB3aWR0aD0iMTEyMCIgaGVpZ2h0PSI2ODAiIGNsYXNzPSJhIiByeD0iMTIiLz4KPGNpcmNsZSBjeD0iMzAwIiBjeT0iMzAwIiByPSI2MCIgZmlsbD0iI2YwYjkwYiIgb3BhY2l0eT0iMC4zIi8+CjxjaXJjbGUgY3g9IjE2MDAiIGN5PSI3MDAiIHI9IjgwIiBmaWxsPSIjZjBiOTBiIiBvcGFjaXR5PSIwLjIiLz4KPC9zdmc+');
+            background-size: cover;
+            background-position: center;
+            display: flex;
+            align-items: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero-content {
+            padding: 0 60px;
+            max-width: 600px;
+            z-index: 10;
+        }
+
+        .hero-title {
+            font-size: 4rem;
+            font-weight: 900;
+            margin-bottom: 20px;
+            background: linear-gradient(135deg, #ffffff 0%, #f0b90b 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+
+        .hero-description {
+            font-size: 1.2rem;
+            line-height: 1.6;
+            margin-bottom: 30px;
+            opacity: 0.9;
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 15px;
+        }
+
+        .btn {
+            padding: 15px 30px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #f0b90b 0%, #d4a507 100%);
+            color: #000;
+            box-shadow: 0 4px 20px rgba(240, 185, 11, 0.4);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 30px rgba(240, 185, 11, 0.6);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.2);
+            color: white;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.3);
+            transform: translateY(-2px);
+        }
+
+        /* Content Sections */
+        .content-sections {
+            padding: 40px 60px;
+        }
+
+        .section {
+            margin-bottom: 50px;
+        }
+
+        .section-title {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 25px;
+            color: #f0b90b;
+        }
+
+        .horizontal-scroll {
+            display: flex;
+            gap: 20px;
+            overflow-x: auto;
+            padding: 10px 0;
+            scroll-behavior: smooth;
+        }
+
+        .horizontal-scroll::-webkit-scrollbar {
+            height: 8px;
+        }
+
+        .horizontal-scroll::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        .horizontal-scroll::-webkit-scrollbar-thumb {
+            background: #f0b90b;
+            border-radius: 4px;
+        }
+
+        .movie-card {
+            min-width: 200px;
+            height: 300px;
+            background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+            border-radius: 12px;
+            position: relative;
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.4s cubic-bezier(0.23, 1, 0.320, 1);
+            border: 2px solid transparent;
+        }
+
+        .movie-card:hover {
+            transform: scale(1.05) translateY(-10px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+            border-color: rgba(240, 185, 11, 0.5);
+        }
+
+        .movie-poster {
+            width: 100%;
+            height: 75%;
+            background: linear-gradient(45deg, #333, #555);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            color: #888;
+            position: relative;
+        }
+
+        .movie-info {
+            padding: 15px;
+            height: 25%;
+        }
+
+        .movie-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 5px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .movie-genre {
+            font-size: 12px;
+            opacity: 0.7;
+        }
+
+        /* Quality Badge */
+        .quality-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(240, 185, 11, 0.9);
+            color: black;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        /* Responsive */
+        @media (max-width: 1024px) {
+            .sidebar {
+                width: 240px;
+            }
+            .main-content {
+                margin-left: 240px;
+            }
+            .hero-title {
+                font-size: 3rem;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                transform: translateX(-100%);
+            }
+            .main-content {
+                margin-left: 0;
+            }
+            .hero-title {
+                font-size: 2.5rem;
+            }
+            .content-sections {
+                padding: 20px;
+            }
+        }
+
+        /* Animations */
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
+        }
+
+        .hero-section::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(240, 185, 11, 0.1) 0%, transparent 70%);
+            animation: float 6s ease-in-out infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="logo">AdoboFlix</div>
+            
+            <div class="search-container">
+                <input type="text" class="search-input" placeholder="Search movies & shows...">
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">Provider</div>
+                <div class="filter-option active">All</div>
+                <div class="filter-option">Miruro</div>
+                <div class="filter-option">ReelPipe</div>
+                <div class="filter-option">StreamVault</div>
+                <div class="filter-option">CinemaHub</div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">Genre</div>
+                <div class="filter-option">Action</div>
+                <div class="filter-option">Comedy</div>
+                <div class="filter-option">Drama</div>
+                <div class="filter-option">Sci-Fi</div>
+                <div class="filter-option">Horror</div>
+                <div class="filter-option">Romance</div>
+            </div>
+
+            <div class="filter-section">
+                <div class="filter-title">Type</div>
+                <div class="filter-option">Movies</div>
+                <div class="filter-option">TV Shows</div>
+                <div class="filter-option">Documentaries</div>
+                <div class="filter-option">Anime</div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Hero Section -->
+            <div class="hero-section">
+                <div class="hero-content">
+                    <h1 class="hero-title">Quantum Nexus</h1>
+                    <p class="hero-description">
+                        In a dystopian future, humanity's last hope lies in the quantum realm. 
+                        Join Dr. Elena Vasquez as she navigates parallel dimensions to save our reality.
+                    </p>
+                    <div class="hero-buttons">
+                        <button class="btn btn-primary">▶ Play Now</button>
+                        <button class="btn btn-secondary">+ Add to List</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Content Sections -->
+            <div class="content-sections">
+                <!-- Trending Now -->
+                <div class="section">
+                    <h2 class="section-title">Trending Now</h2>
+                    <div class="horizontal-scroll">
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Neon Shadows</div>
+                                <div class="movie-genre">Cyberpunk</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Digital Dreams</div>
+                                <div class="movie-genre">Drama</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Adobo Chronicles</div>
+                                <div class="movie-genre">Filipino Cinema</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Manila Nights</div>
+                                <div class="movie-genre">Romance</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Storm Riders</div>
+                                <div class="movie-genre">Action</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Code Breakers</div>
+                                <div class="movie-genre">Thriller</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- New Releases -->
+                <div class="section">
+                    <h2 class="section-title">New Releases</h2>
+                    <div class="horizontal-scroll">
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Stellar Voyage</div>
+                                <div class="movie-genre">Sci-Fi</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">The Last Garden</div>
+                                <div class="movie-genre">Post-Apocalyptic</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Crypto Kings</div>
+                                <div class="movie-genre">Documentary</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Bamboo Warriors</div>
+                                <div class="movie-genre">Martial Arts</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Ocean's Echo</div>
+                                <div class="movie-genre">Mystery</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Virtual Reality</div>
+                                <div class="movie-genre">Tech Thriller</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Action Movies -->
+                <div class="section">
+                    <h2 class="section-title">Action Movies</h2>
+                    <div class="horizontal-scroll">
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Thunder Strike</div>
+                                <div class="movie-genre">Action</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Night Falcon</div>
+                                <div class="movie-genre">Action/Spy</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Steel Phoenix</div>
+                                <div class="movie-genre">Mecha</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Desert Storm</div>
+                                <div class="movie-genre">War</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">4K</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Cyber Agent</div>
+                                <div class="movie-genre">Cyberpunk</div>
+                            </div>
+                        </div>
+                        <div class="movie-card">
+                            <div class="movie-poster">
+                                <span>POSTER</span>
+                                <div class="quality-badge">HD</div>
+                            </div>
+                            <div class="movie-info">
+                                <div class="movie-title">Final Mission</div>
+                                <div class="movie-genre">Military</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

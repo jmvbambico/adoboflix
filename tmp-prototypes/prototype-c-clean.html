@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AdoboFlix - Clean Grid</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0b0b0b;
+            color: #ffffff;
+            min-height: 100vh;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 64px;
+            background: rgba(11, 11, 11, 0.85);
+            backdrop-filter: blur(24px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 32px;
+            z-index: 100;
+        }
+
+        .top-left {
+            display: flex;
+            align-items: center;
+            gap: 40px;
+        }
+
+        .logo {
+            font-size: 22px;
+            font-weight: 900;
+            color: #f0b90b;
+            letter-spacing: -1px;
+        }
+        .logo span { font-weight: 300; color: rgba(255,255,255,0.4); }
+
+        .top-nav {
+            display: flex;
+            gap: 24px;
+        }
+
+        .top-nav a {
+            color: rgba(255,255,255,0.6);
+            text-decoration: none;
+            font-size: 13px;
+            font-weight: 500;
+            transition: color 0.2s;
+            padding: 6px 0;
+        }
+        .top-nav a:hover,
+        .top-nav a.active {
+            color: #fff;
+        }
+        .top-nav a.active {
+            color: #f0b90b;
+        }
+
+        .top-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .search-box {
+            position: relative;
+        }
+
+        .search-box input {
+            width: 260px;
+            padding: 9px 14px 9px 36px;
+            background: rgba(255,255,255,0.07);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 13px;
+            transition: all 0.25s;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: #f0b90b;
+            background: rgba(240,185,11,0.07);
+            box-shadow: 0 0 0 3px rgba(240,185,11,0.1);
+        }
+
+        .search-box::before {
+            content: '🔍';
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 12px;
+            opacity: 0.4;
+        }
+
+        /* Layout */
+        .layout {
+            display: flex;
+            margin-top: 64px;
+            min-height: calc(100vh - 64px);
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 220px;
+            background: rgba(15, 15, 15, 0.6);
+            border-right: 1px solid rgba(255,255,255,0.04);
+            padding: 28px 16px;
+            position: fixed;
+            top: 64px;
+            height: calc(100vh - 64px);
+            overflow-y: auto;
+        }
+
+        .sidebar::-webkit-scrollbar { width: 4px; }
+        .sidebar::-webkit-scrollbar-thumb { background: rgba(240,185,11,0.3); border-radius: 4px; }
+
+        .filter-category {
+            margin-bottom: 28px;
+        }
+
+        .filter-category h3 {
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1.8px;
+            color: #f0b90b;
+            margin-bottom: 12px;
+            opacity: 0.8;
+        }
+
+        .filter-chip {
+            display: inline-block;
+            padding: 6px 14px;
+            margin: 3px 4px 3px 0;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.06);
+            border-radius: 20px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+            color: rgba(255,255,255,0.7);
+        }
+
+        .filter-chip:hover {
+            background: rgba(240,185,11,0.12);
+            border-color: rgba(240,185,11,0.3);
+        }
+
+        .filter-chip.active {
+            background: rgba(240,185,11,0.15);
+            border-color: #f0b90b;
+            color: #f0b90b;
+        }
+
+        .filter-radio-group {
+            list-style: none;
+        }
+
+        .filter-radio-group li {
+            padding: 8px 12px;
+            margin: 2px 0;
+            cursor: pointer;
+            font-size: 13px;
+            color: rgba(255,255,255,0.6);
+            transition: all 0.2s;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .filter-radio-group li:hover {
+            background: rgba(255,255,255,0.04);
+            color: #fff;
+        }
+
+        .filter-radio-group li.active {
+            background: rgba(240,185,11,0.1);
+            color: #f0b90b;
+        }
+
+        .filter-radio-group li .count {
+            font-size: 11px;
+            color: rgba(255,255,255,0.25);
+        }
+
+        /* Content */
+        .content {
+            flex: 1;
+            margin-left: 220px;
+            padding: 32px;
+        }
+
+        /* Results toolbar */
+        .results-toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 28px;
+        }
+
+        .results-count {
+            font-size: 14px;
+            color: rgba(255,255,255,0.5);
+        }
+        .results-count strong {
+            color: #fff;
+        }
+
+        .view-options {
+            display: flex;
+            gap: 8px;
+        }
+
+        .view-btn {
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.1);
+            color: rgba(255,255,255,0.4);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .view-btn:hover,
+        .view-btn.active {
+            background: rgba(240,185,11,0.1);
+            border-color: #f0b90b;
+            color: #f0b90b;
+        }
+
+        /* Poster Grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 24px;
+        }
+
+        .card {
+            background: rgba(20, 20, 20, 0.6);
+            border-radius: 12px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: all 0.35s cubic-bezier(0.23, 1, 0.320, 1);
+            border: 1px solid rgba(255,255,255,0.04);
+        }
+
+        .card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+            border-color: rgba(240,185,11,0.25);
+        }
+
+        .card-poster {
+            width: 100%;
+            aspect-ratio: 2 / 3;
+            background: linear-gradient(145deg, #222, #2a2a2a);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            color: #555;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .card-poster::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(to bottom, transparent 60%, rgba(0,0,0,0.6) 100%);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .card:hover .card-poster::after {
+            opacity: 1;
+        }
+
+        .card-badge {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 700;
+            z-index: 2;
+        }
+
+        .card-badge.gold {
+            background: #f0b90b;
+            color: #000;
+        }
+
+        .card-badge.green {
+            background: #1ed5a9;
+            color: #000;
+        }
+
+        .card-badge.blue {
+            background: rgba(59, 130, 246, 0.8);
+            color: #fff;
+        }
+
+        .card-info {
+            padding: 12px;
+        }
+
+        .card-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 4px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .card-sub {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: rgba(255,255,255,0.5);
+        }
+
+        .card-rating {
+            color: #f0b90b;
+        }
+
+        .card-menu {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            z-index: 2;
+            width: 28px;
+            height: 28px;
+            background: rgba(0,0,0,0.5);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.25s;
+            border: none;
+            color: white;
+        }
+
+        .card:hover .card-menu {
+            opacity: 1;
+        }
+
+        /* Hover Overlay on poster */
+        .card-hover-play {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 3;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .card:hover .card-hover-play {
+            opacity: 1;
+        }
+
+        .card-hover-play .circle {
+            width: 48px;
+            height: 48px;
+            background: rgba(240, 185, 11, 0.9);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            color: #000;
+            transition: transform 0.2s;
+            box-shadow: 0 4px 20px rgba(240,185,11,0.3);
+        }
+
+        .card:hover .circle {
+            transform: scale(1.1);
+        }
+
+        /* Player (minimal) */
+        .player-minimal {
+            margin-top: 40px;
+            padding: 20px;
+            background: rgba(15,15,15,0.8);
+            border-radius: 16px;
+            border: 1px solid rgba(255,255,255,0.06);
+        }
+
+        .player-minimal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+        }
+
+        .player-minimal-header h3 {
+            font-size: 16px;
+            font-weight: 600;
+            color: #f0b90b;
+        }
+
+        .player-minimal-bar {
+            height: 4px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 2px;
+            margin-bottom: 12px;
+            overflow: hidden;
+        }
+
+        .player-minimal-bar .fill {
+            width: 34%;
+            height: 100%;
+            background: linear-gradient(90deg, #f0b90b, #ffd700);
+            border-radius: 2px;
+            transition: width 0.3s;
+        }
+
+        .player-minimal-controls {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .player-minimal-controls button {
+            background: rgba(255,255,255,0.06);
+            border: none;
+            color: rgba(255,255,255,0.7);
+            padding: 8px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .player-minimal-controls button:hover {
+            background: rgba(240,185,11,0.15);
+            color: #f0b90b;
+        }
+
+        .player-minimal-controls .play-btn-big {
+            width: 40px;
+            height: 40px;
+            background: linear-gradient(135deg, #f0b90b, #d4a507);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #000;
+            font-size: 16px;
+            padding: 0;
+        }
+
+        .player-minimal-controls .play-btn-big:hover {
+            transform: scale(1.1);
+            background: linear-gradient(135deg, #ffd700, #f0b90b);
+        }
+
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .content { margin-left: 0; }
+            .search-box input { width: 160px; }
+            .grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 16px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- Top Bar -->
+    <header class="top-bar">
+        <div class="top-left">
+            <div class="logo">Adobo<span>Flix</span></div>
+            <nav class="top-nav">
+                <a href="#" class="active">Browse</a>
+                <a href="#">Movies</a>
+                <a href="#">Series</a>
+                <a href="#">Library</a>
+                <a href="#">Favorites</a>
+            </nav>
+        </div>
+        <div class="top-right">
+            <div class="search-box">
+                <input type="text" placeholder="Search 1,700+ titles...">
+            </div>
+        </div>
+    </header>
+
+    <div class="layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="filter-category">
+                <h3>Provider</h3>
+                <ul class="filter-radio-group">
+                    <li class="active">All <span class="count">1,742</span></li>
+                    <li>Miruro <span class="count">423</span></li>
+                    <li>ReelPipe <span class="count">387</span></li>
+                    <li>StreamVault <span class="count">298</span></li>
+                    <li>CinemaHub <span class="count">356</span></li>
+                    <li>FlixWave <span class="count">278</span></li>
+                </ul>
+            </div>
+
+            <div class="filter-category">
+                <h3>Genre</h3>
+                <div>
+                    <span class="filter-chip active">All</span>
+                    <span class="filter-chip">Action</span>
+                    <span class="filter-chip">Comedy</span>
+                    <span class="filter-chip">Drama</span>
+                    <span class="filter-chip">Sci-Fi</span>
+                    <span class="filter-chip">Horror</span>
+                    <span class="filter-chip">Thriller</span>
+                    <span class="filter-chip">Romance</span>
+                    <span class="filter-chip">Animation</span>
+                    <span class="filter-chip">Documentary</span>
+                    <span class="filter-chip">Fantasy</span>
+                </div>
+            </div>
+
+            <div class="filter-category">
+                <h3>Type</h3>
+                <ul class="filter-radio-group">
+                    <li class="active">All Media <span class="count">1,742</span></li>
+                    <li>Movies <span class="count">892</span></li>
+                    <li>TV Series <span class="count">450</span></li>
+                    <li>Anime <span class="count">215</span></li>
+                    <li>Documentaries <span class="count">185</span></li>
+                </ul>
+            </div>
+
+            <div class="filter-category">
+                <h3>Audio</h3>
+                <div>
+                    <span class="filter-chip active">All</span>
+                    <span class="filter-chip">English</span>
+                    <span class="filter-chip">Filipino</span>
+                    <span class="filter-chip">Japanese</span>
+                    <span class="filter-chip">Korean</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Content -->
+        <main class="content">
+            <!-- Toolbar -->
+            <div class="results-toolbar">
+                <div class="results-count">
+                    Showing <strong>48</strong> of <strong>1,742</strong> titles
+                </div>
+                <div class="view-options">
+                    <button class="view-btn active">All</button>
+                    <button class="view-btn">Grid</button>
+                    <button class="view-btn">List</button>
+                </div>
+            </div>
+
+            <!-- Grid -->
+            <div class="grid">
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Quantum Nexus</div>
+                        <div class="card-sub"><span class="card-rating">★ 9.4</span> 2025 · Sci-Fi</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Neon Shadows</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.7</span> 2025 · Cyberpunk</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Digital Dreams</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.2</span> 2024 · Drama</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Adobo Chronicles</div>
+                        <div class="card-sub"><span class="card-rating">★ 9.1</span> 2025 · Filipino</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Storm Riders</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.9</span> 2024 · Action</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge blue">HDR</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Code Breakers</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.5</span> 2024 · Thriller</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Manila Nights</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.8</span> 2025 · Romance</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Stellar Voyage</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.6</span> 2025 · Sci-Fi</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">The Last Garden</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.4</span> 2024 · Post-Apoc</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Crypto Kings</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.1</span> 2025 · Doc</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Bamboo Warriors</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.3</span> 2024 · Martial Arts</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge blue">HDR</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Ocean's Echo</div>
+                        <div class="card-sub"><span class="card-rating">★ 7.9</span> 2024 · Mystery</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Virtual Reality</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.0</span> 2025 · Tech Thriller</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Thunder Strike</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.6</span> 2024 · Action</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Night Falcon</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.3</span> 2024 · Spy</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge blue">HDR</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Steel Phoenix</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.5</span> 2025 · Mecha</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Desert Storm</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.2</span> 2024 · War</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge green">New</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Cyber Agent</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.7</span> 2025 · Cyberpunk</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge gold">4K</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">Final Mission</div>
+                        <div class="card-sub"><span class="card-rating">★ 8.7</span> 2024 · Military</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-poster">
+                        <span>POSTER</span>
+                        <span class="card-badge blue">HDR</span>
+                        <div class="card-hover-play"><div class="circle">▶</div></div>
+                    </div>
+                    <div class="card-info">
+                        <div class="card-title">The Lost City</div>
+                        <div class="card-sub"><span class="card-rating">★ 7.8</span> 2024 · Adventure</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Minimal Player Area -->
+            <div class="player-minimal">
+                <div class="player-minimal-header">
+                    <h3>▶ Now Playing — Quantum Nexus (S01E03)</h3>
+                    <span style="font-size:13px;color:rgba(255,255,255,0.4);">1:02:34 / 2:18:00</span>
+                </div>
+                <div class="player-minimal-bar">
+                    <div class="fill"></div>
+                </div>
+                <div class="player-minimal-controls">
+                    <button>⏮</button>
+                    <button class="play-btn-big">▶</button>
+                    <button>⏭</button>
+                    <span style="margin-left:12px;font-size:13px;color:rgba(255,255,255,0.5);">Shaka Player · DRM Protected</span>
+                    <button style="margin-left:auto;">⚙️</button>
+                    <button>⛶</button>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>

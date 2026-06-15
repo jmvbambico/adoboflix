@@ -1,0 +1,34 @@
+# Binaries
+/adoboflix
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go workspace
+go.work
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Dependencies
+node_modules/
+
+# Frontend build
+client/dist/
+static/
+
+# OS
+.DS_Store
+Thumbs.db

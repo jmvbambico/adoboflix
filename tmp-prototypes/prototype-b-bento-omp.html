@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AdoboFlix - Bento Grid (OMP Colors)</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..700&display=swap" rel="stylesheet" />
+    <style>
+        :root {
+            --bg-0: #09090b;
+            --bg-1: #0c0c0f;
+            --bg-2: #111114;
+            --bg-3: #18181b;
+            --bg-4: #1f1f23;
+            --b1: rgba(255,255,255,0.06);
+            --b2: rgba(255,255,255,0.09);
+            --b3: rgba(255,255,255,0.14);
+            --t1: #fafafa;
+            --t2: #a1a1aa;
+            --t3: #71717a;
+            --t4: #3f3f46;
+            --accent: #f59e0b;
+            --accent-dim: rgba(245,158,11,0.1);
+            --green: #22c55e;
+            --green-dim: rgba(34,197,94,0.08);
+            --red: #ef4444;
+            --red-dim: rgba(239,68,68,0.08);
+            --blue: #3b82f6;
+            --blue-dim: rgba(59,130,246,0.08);
+            --purple: #a78bfa;
+            --r: 10px;
+            --rs: 6px;
+            --ui: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif;
+            --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', ui-monospace, monospace;
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            background: var(--bg-0); color: var(--t1); font-family: var(--ui); 
+            font-size: 14px; line-height: 1.5; min-height: 100vh;
+        }
+        
+        /* Header */
+        .header {
+            height: 48px; display: flex; align-items: center; justify-content: space-between;
+            padding: 0 20px; background: var(--bg-1); border-bottom: 1px solid var(--b1);
+        }
+        .brand {
+            font-weight: 700; font-size: 15px; color: var(--t1); letter-spacing: -0.3px;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .brand .logo { 
+            width: 24px; height: 24px; background: var(--accent); border-radius: 4px;
+            display: flex; align-items: center; justify-content: center; color: var(--bg-0);
+        }
+        .search-bar {
+            flex: 1; max-width: 400px; margin: 0 20px;
+        }
+        .search-bar input {
+            width: 100%; background: var(--bg-0); border: 1px solid var(--b1); 
+            color: var(--t1); font-family: var(--ui); font-size: 13px; 
+            padding: 8px 14px; border-radius: var(--rs); outline: none;
+        }
+        .search-bar input:focus { border-color: var(--accent); }
+        .search-bar input::placeholder { color: var(--t4); }
+        
+        .header-controls {
+            display: flex; align-items: center; gap: 12px;
+        }
+        
+        /* Sidebar */
+        .layout { display: flex; min-height: calc(100vh - 48px); }
+        .sidebar {
+            width: 240px; background: var(--bg-1); border-right: 1px solid var(--b1);
+            padding: 20px; flex-shrink: 0;
+        }
+        
+        .filter-section { margin-bottom: 24px; }
+        .filter-title {
+            font-size: 11px; font-weight: 600; color: var(--t4);
+            text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 10px;
+        }
+        
+        .filter-item {
+            display: flex; align-items: center; gap: 8px; padding: 6px 0;
+            cursor: pointer; transition: color 0.12s;
+        }
+        .filter-item:hover { color: var(--accent); }
+        .filter-item.active { color: var(--accent); }
+        .filter-item input[type="checkbox"] {
+            accent-color: var(--accent); width: 14px; height: 14px;
+        }
+        
+        /* Main Content */
+        .main { flex: 1; padding: 20px; }
+        
+        /* Player Bar */
+        .player-bar {
+            background: var(--bg-2); border: 1px solid var(--b1); border-radius: var(--r);
+            padding: 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 16px;
+        }
+        .player-poster {
+            width: 60px; height: 90px; background: var(--bg-3); border-radius: var(--rs);
+            background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="%23f59e0b" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>');
+            background-size: 20px; background-repeat: no-repeat; background-position: center;
+        }
+        .player-info { flex: 1; }
+        .player-title { font-size: 14px; font-weight: 600; color: var(--t1); }
+        .player-subtitle { font-size: 12px; color: var(--t3); margin-top: 2px; }
+        .player-controls {
+            display: flex; align-items: center; gap: 12px;
+        }
+        .control-btn {
+            width: 36px; height: 36px; border: 1px solid var(--b1); 
+            background: var(--bg-3); color: var(--t2); border-radius: var(--rs);
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; transition: all 0.12s;
+        }
+        .control-btn:hover { color: var(--accent); border-color: var(--accent); }
+        .control-btn.play { background: var(--accent); color: var(--bg-0); border-color: var(--accent); }
+        
+        /* Bento Grid */
+        .bento-grid {
+            display: grid;
+            grid-template-columns: repeat(6, 1fr);
+            grid-template-rows: repeat(4, 200px);
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        
+        .bento-item {
+            position: relative; border-radius: var(--r); overflow: hidden;
+            background: var(--bg-2); border: 1px solid var(--b1);
+            cursor: pointer; transition: all 0.2s;
+            background-size: cover; background-position: center;
+        }
+        
+        .bento-item:hover { 
+            transform: translateY(-2px); 
+            border-color: var(--accent);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+        }
+        
+        /* Featured large items */
+        .bento-item.featured-1 { 
+            grid-column: span 2; grid-row: span 2;
+            background-image: linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.7)), url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="%23f59e0b" viewBox="0 0 100 150"><rect width="100" height="150" fill="%23111114"/><circle cx="50" cy="75" r="20" fill="%23f59e0b"/></svg>');
+        }
+        .bento-item.featured-2 { 
+            grid-column: span 2; grid-row: span 2;
+            background-image: linear-gradient(rgba(0,0,0,0.3), rgba(0,0,0,0.7)), url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="%2322c55e" viewBox="0 0 100 150"><rect width="100" height="150" fill="%23111114"/><rect x="25" y="50" width="50" height="50" fill="%2322c55e"/></svg>');
+        }
+        
+        /* Regular items */
+        .bento-item.regular {
+            background-image: linear-gradient(rgba(0,0,0,0.4), rgba(0,0,0,0.8)), url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="%233f3f46" viewBox="0 0 100 150"><rect width="100" height="150" fill="%23111114"/><rect x="10" y="20" width="80" height="110" fill="%233f3f46" rx="4"/></svg>');
+        }
+        
+        .bento-overlay {
+            position: absolute; bottom: 0; left: 0; right: 0;
+            padding: 12px; background: linear-gradient(transparent, rgba(0,0,0,0.8));
+            color: var(--t1);
+        }
+        
+        .bento-title { 
+            font-size: 13px; font-weight: 600; margin-bottom: 4px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .bento-subtitle { 
+            font-size: 11px; color: var(--t3);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        
+        /* Play overlay */
+        .bento-play {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            width: 48px; height: 48px; background: rgba(245,158,11,0.9);
+            border-radius: 50%; display: flex; align-items: center; justify-content: center;
+            color: var(--bg-0); opacity: 0; transition: opacity 0.2s;
+        }
+        .bento-item:hover .bento-play { opacity: 1; }
+        
+        /* Regular Grid */
+        .content-grid {
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 16px;
+        }
+        
+        .poster-card {
+            background: var(--bg-2); border: 1px solid var(--b1); 
+            border-radius: var(--rs); overflow: hidden; cursor: pointer;
+            transition: all 0.2s;
+        }
+        .poster-card:hover { 
+            transform: translateY(-4px); 
+            border-color: var(--accent);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+        }
+        
+        .poster {
+            aspect-ratio: 2/3; background: var(--bg-3);
+            background-image: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" fill="%233f3f46" viewBox="0 0 100 150"><rect width="100" height="150" fill="%23111114"/><rect x="10" y="20" width="80" height="110" fill="%233f3f46" rx="4"/></svg>');
+            background-size: cover; background-position: center; position: relative;
+        }
+        
+        .poster-info {
+            padding: 12px;
+        }
+        .poster-title { 
+            font-size: 12px; font-weight: 600; color: var(--t1); margin-bottom: 4px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .poster-meta { 
+            font-size: 10px; color: var(--t3);
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        
+        .section-title {
+            font-size: 16px; font-weight: 700; color: var(--t1);
+            margin: 30px 0 16px 0; display: flex; align-items: center; gap: 8px;
+        }
+        .section-title::before {
+            content: ''; width: 3px; height: 20px; background: var(--accent); border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="brand">
+            <div class="logo">🎬</div>
+            <span>AdoboFlix</span>
+        </div>
+        <div class="search-bar">
+            <input type="text" placeholder="Search 1,700+ titles..." />
+        </div>
+        <div class="header-controls">
+            <div style="font-size: 11px; color: var(--t3); font-family: var(--mono);">1,734 titles</div>
+        </div>
+    </header>
+    
+    <div class="layout">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="filter-section">
+                <h3 class="filter-title">Provider</h3>
+                <label class="filter-item active">
+                    <input type="checkbox" checked />
+                    <span>All Providers</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Miruro (847)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>ReelPipe (523)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>VidStreaming (281)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>VidCloud9 (83)</span>
+                </label>
+            </div>
+            
+            <div class="filter-section">
+                <h3 class="filter-title">Genre</h3>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Action (312)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Drama (298)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Comedy (245)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Thriller (198)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Sci-Fi (156)</span>
+                </label>
+            </div>
+            
+            <div class="filter-section">
+                <h3 class="filter-title">Type</h3>
+                <label class="filter-item active">
+                    <input type="checkbox" checked />
+                    <span>All Types</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>Movies (1,142)</span>
+                </label>
+                <label class="filter-item">
+                    <input type="checkbox" />
+                    <span>TV Series (592)</span>
+                </label>
+            </div>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Now Playing Bar -->
+            <div class="player-bar">
+                <div class="player-poster"></div>
+                <div class="player-info">
+                    <div class="player-title">Dune: Part Two</div>
+                    <div class="player-subtitle">2024 • Sci-Fi • 2h 46m</div>
+                </div>
+                <div class="player-controls">
+                    <button class="control-btn">⏮</button>
+                    <button class="control-btn play">▶</button>
+                    <button class="control-btn">⏭</button>
+                    <button class="control-btn">⚙</button>
+                </div>
+            </div>
+            
+            <!-- Featured Content - Bento Grid -->
+            <div class="bento-grid">
+                <!-- Large featured items -->
+                <div class="bento-item featured-1">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">The Matrix Resurrections</div>
+                        <div class="bento-subtitle">2021 • Action, Sci-Fi</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item featured-2">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Stranger Things S4</div>
+                        <div class="bento-subtitle">2022 • Horror, Drama</div>
+                    </div>
+                </div>
+                
+                <!-- Regular items -->
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Top Gun: Maverick</div>
+                        <div class="bento-subtitle">2022 • Action</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Wednesday</div>
+                        <div class="bento-subtitle">2022 • Comedy</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Black Panther 2</div>
+                        <div class="bento-subtitle">2022 • Action</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">House of Dragon</div>
+                        <div class="bento-subtitle">2022 • Fantasy</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Avatar 2</div>
+                        <div class="bento-subtitle">2022 • Adventure</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">The Bear S2</div>
+                        <div class="bento-subtitle">2022 • Comedy</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Thor: L&T</div>
+                        <div class="bento-subtitle">2022 • Action</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">The Boys S3</div>
+                        <div class="bento-subtitle">2022 • Action</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Ozark S4</div>
+                        <div class="bento-subtitle">2022 • Crime</div>
+                    </div>
+                </div>
+                
+                <div class="bento-item regular">
+                    <div class="bento-play">▶</div>
+                    <div class="bento-overlay">
+                        <div class="bento-title">Euphoria S2</div>
+                        <div class="bento-subtitle">2022 • Drama</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Regular Content Grid -->
+            <h2 class="section-title">Recently Added</h2>
+            <div class="content-grid">
+                <!-- Generate 20 poster cards -->
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Everything Everywhere</div>
+                        <div class="poster-meta">2022 • Comedy, Sci-Fi</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">The Menu</div>
+                        <div class="poster-meta">2022 • Horror, Thriller</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Glass Onion</div>
+                        <div class="poster-meta">2022 • Mystery, Comedy</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Nope</div>
+                        <div class="poster-meta">2022 • Horror, Sci-Fi</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Bullet Train</div>
+                        <div class="poster-meta">2022 • Action, Comedy</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">She-Hulk</div>
+                        <div class="poster-meta">2022 • Action, Comedy</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">The Sandman</div>
+                        <div class="poster-meta">2022 • Fantasy, Horror</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Rings of Power</div>
+                        <div class="poster-meta">2022 • Fantasy, Adventure</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Dahmer</div>
+                        <div class="poster-meta">2022 • Crime, Drama</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">The Crown S5</div>
+                        <div class="poster-meta">2022 • Drama, Biography</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Amsterdam</div>
+                        <div class="poster-meta">2022 • Comedy, Drama</div>
+                    </div>
+                </div>
+                
+                <div class="poster-card">
+                    <div class="poster"></div>
+                    <div class="poster-info">
+                        <div class="poster-title">Don't Worry Darling</div>
+                        <div class="poster-meta">2022 • Thriller, Drama</div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+</body>
+</html>
