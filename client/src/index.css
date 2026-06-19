@@ -1,142 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
-:root {
-  --bg-0: #09090b;
-  --bg-1: #0c0c0f;
-  --bg-2: #111114;
-  --bg-3: #18181b;
-  --bg-4: #1f1f23;
-  --b1: rgba(255,255,255,0.06);
-  --b2: rgba(255,255,255,0.09);
-  --b3: rgba(255,255,255,0.14);
-  --t1: #fafafa;
-  --t2: #a1a1aa;
-  --t3: #71717a;
-  --t4: #3f3f46;
-  --accent: #f59e0b;
-  --accent-dim: rgba(245,158,11,0.1);
-  --green: #22c55e;
-  --green-dim: rgba(34,197,94,0.08);
-  --red: #ef4444;
-  --red-dim: rgba(239,68,68,0.08);
-  --blue: #3b82f6;
-  --blue-dim: rgba(59,130,246,0.08);
-  --purple: #a78bfa;
-  --r: 10px;
-  --rs: 6px;
+@theme {
+  --font-sans: 'Outfit', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Premium high-end sophisticated dark palette */
+  --color-accent-orange: #f97316;
+  --color-accent-indigo: #6366f1;
+  --color-accent-gold: #f59e0b;
 }
 
+/* Glassmorphism Styles */
+.glass-panel {
+  background: rgba(10, 10, 10, 0.7);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-panel-light {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-card {
+  background: rgba(12, 12, 12, 0.5);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card:hover {
+  background: rgba(18, 18, 18, 0.7);
+  border-color: rgba(249, 115, 22, 0.25);
+  box-shadow: 0 12px 40px -15px rgba(249, 115, 22, 0.15);
+}
+
+.glass-pill {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 10, 10, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(249, 115, 22, 0.4);
+}
+
+/* Base Body Styles */
 body {
-  background: var(--bg-0);
-  color: var(--t1);
-  font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif;
+  background-color: #050505;
+  color: #eeeeee;
+  font-family: var(--font-sans);
+  overflow-x: hidden;
 }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 9px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--b2); border-radius: 100px; border: 2px solid var(--bg-0); }
-::-webkit-scrollbar-thumb:hover { background: var(--b3); }
-
-/* Bento Grid */
-.bento-grid {
-  display: grid;
-  grid-template-columns: repeat(6, 1fr);
-  grid-template-rows: repeat(2, 200px);
-  gap: 12px;
+/* Hide native video controls but keep standard behavior */
+video::-webkit-media-controls {
+  display: none !important;
 }
 
-.bento-item {
-  position: relative;
-  border-radius: var(--r);
-  overflow: hidden;
-  background: var(--bg-2);
-  border: 1px solid var(--b1);
-  cursor: pointer;
-  transition: all 0.2s;
-  background-size: cover;
-  background-position: center;
+/* Dynamic background animations */
+@keyframes drift {
+  0% {
+    transform: translate(0px, 0px) scale(1);
+  }
+  33% {
+    transform: translate(30px, -50px) scale(1.1);
+  }
+  66% {
+    transform: translate(-20px, 20px) scale(0.95);
+  }
+  100% {
+    transform: translate(0px, 0px) scale(1);
+  }
 }
 
-.bento-item:hover {
-  transform: translateY(-2px);
-  border-color: var(--accent);
-  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+.animate-drift-slow {
+  animation: drift 20s infinite alternate ease-in-out;
 }
 
-.bento-item.featured {
-  grid-column: span 2;
-  grid-row: span 2;
-}
-
-.bento-overlay {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  padding: 12px;
-  background: linear-gradient(transparent, rgba(0,0,0,0.8));
-  color: var(--t1);
-}
-
-.bento-title {
-  font-size: 13px;
-  font-weight: 600;
-  margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bento-subtitle {
-  font-size: 11px;
-  color: var(--t3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bento-play {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 48px;
-  height: 48px;
-  background: rgba(245,158,11,0.9);
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--bg-0);
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-.bento-item:hover .bento-play {
-  opacity: 1;
-}
-
-/* Filter chips */
-.filter-chip {
-  font-size: 12px;
-  font-weight: 500;
-  border: 1px solid var(--b1);
-  background: transparent;
-  color: var(--t3);
-  padding: 5px 14px;
-  border-radius: 100px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-
-.filter-chip:hover {
-  color: var(--t2);
-  border-color: var(--b2);
-}
-
-.filter-chip.active {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-dim);
+.animate-drift-slower {
+  animation: drift 30s infinite alternate-reverse ease-in-out;
 }

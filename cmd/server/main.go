@@ -46,10 +46,13 @@ func main() {
 		api.GET("/genres", playerHandler.GetGenres)
 		api.GET("/resolve", playerHandler.ResolveStream)
 		api.GET("/proxy", playerHandler.ProxyStream)
+		api.GET("/episodes/:vodId", playerHandler.GetEpisodes)
+		api.GET("/resolve/episode/:episodeId", playerHandler.ResolveEpisode)
 	}
 
-	// Serve static files in production
-	r.Static("/static", "./static")
+	// Serve built client assets
+	r.Static("/assets", "./static/assets")
+	r.StaticFile("/", "./static/index.html")
 	r.NoRoute(func(c *gin.Context) {
 		c.File("./static/index.html")
 	})

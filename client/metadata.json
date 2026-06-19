@@ -1,0 +1,6 @@
+{
+  "name": "Premium Media Streamer",
+  "description": "A glassmorphic media streaming platform featuring an interactive custom video player, seamless category filtering, active playback tracking, and rich visual states.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

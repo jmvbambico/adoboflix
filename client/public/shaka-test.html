@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Shaka DRM Test v2</title>
+  <script src="https://cdn.jsdelivr.net/npm/shaka-player@4.15.13/dist/shaka-player.ui.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/shaka-player@4.15.13/dist/controls.css">
+</head>
+<body style="background:#000;color:#fff;font-family:monospace">
+  <h2>ShakaPlayer DRM Test v2</h2>
+  <div id="player-container" style="width:800px;height:450px;background:#111">
+    <video id="video"></video>
+  </div>
+  <div id="log" style="margin-top:10px;white-space:pre-wrap;font-size:12px"></div>
+  <script>
+    var logEl = document.getElementById("log");
+    function add(msg) { logEl.textContent += msg + "\n"; console.log(msg); }
+
+    var CDN_BASE = "https://cdnbp.vivamax.net/video/P02485FFLM12DAYSTODESTINY_2052b784b64f0e157f1ae07acd5bdc00d497a8b2f9fafd10c27e29b3c2103432/dash/";
+    var MPD_URL = CDN_BASE + "hd.mpd";
+    var KID = "0b5f0a394ff4c9bced91000466d08b39";
+    var KEY = "a6280523f5c44bca98e8ee6dc1242d30";
+
+    add("CDN_BASE: " + CDN_BASE);
+    add("KID: " + KID + " KEY: " + KEY);
+
+    shaka.polyfill.installAll();
+    if (!shaka.Player.isBrowserSupported()) {
+      add("ERROR: Browser not supported");
+      throw new Error("Not supported");
+    }
+
+    var video = document.getElementById("video");
+    var player = new shaka.Player(video);
+
+    player.addEventListener("error", function(e) {
+      var err = e.detail;
+      add("SHAKA ERROR: code=" + err.code + " severity=" + err.severity + " message=" + err.message);
+    });
+
+    var ne = player.getNetworkingEngine();
+
+    ne.registerRequestFilter(function(type, request) {
+      var uri = request.uris[0];
+
+      // Skip if already a local proxy path
+      if (uri.indexOf("/api/v1/proxy") !== -1) {
+        add("REQ PASS: " + uri.substring(0, 120));
+        return; // don't touch it
+      }
+
+      add("REQ type=" + type + " uri=" + uri.substring(0, 120));
+
+      // If it's a relative segment URL, resolve against CDN base
+      if (uri.indexOf("http") !== 0) {
+        uri = new URL(uri, CDN_BASE).href;
+        add("  RESOLVED -> " + uri.substring(0, 120));
+      }
+
+      // Proxy external CDN URLs through backend
+      if (uri.indexOf("cdnbp.") !== -1 || (uri.indexOf("http") === 0 && uri.indexOf("127.0.0.1") === -1 && uri.indexOf("localhost") === -1)) {
+        uri = "/api/v1/proxy?url=" + encodeURIComponent(uri) + "&source=DRM";
+        add("  PROXY -> " + uri.substring(0, 120));
+      }
+
+      request.uris = [uri];
+    });
+
+    ne.registerResponseFilter(function(type, response) {
+      var status = response.status;
+      var len = response.data ? response.data.byteLength : 0;
+      if (status >= 400) {
+        add("RESP ERR status=" + status + " len=" + len);
+      } else {
+        add("RESP OK status=" + status + " type=" + type + " len=" + len);
+      }
+    });
+
+    var clearKeysConfig = {};
+    clearKeysConfig[KID] = KEY;
+    player.configure({ drm: { clearKeys: clearKeysConfig } });
+
+    add("Loading...");
+    var loadUrl = "/api/v1/proxy?url=" + encodeURIComponent(MPD_URL) + "&source=DRM";
+    add("LOAD URL: " + loadUrl);
+
+    player.load(loadUrl).then(function() {
+      add("SUCCESS: Stream loaded!");
+      video.play().catch(function(e) { add("Autoplay blocked: " + e.message); });
+    }).catch(function(e) {
+      add("LOAD FAILED: code=" + e.code + " message=" + e.message);
+    });
+  </script>
+</body>
+</html>

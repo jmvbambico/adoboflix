@@ -1,0 +1,228 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Video, Review } from "../types";
+
+export const CATEGORIES = [
+  "All",
+  "Sci-Fi",
+  "Fantasy",
+  "Action",
+  "Nature",
+  "Adventure"
+];
+
+export const VIDEOS: Video[] = [
+  {
+    id: "tears-of-steel",
+    title: "Tears of Steel",
+    description: "Set in a dystopian future Amsterdam, a group of scientists and technicians perform an immersive digital re-enactment of their past in a desperate bid to save the world from destructive giant combat robots.",
+    category: "Sci-Fi",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1509198397868-475647b2a1e5?w=1200&auto=format&fit=crop&q=80",
+    duration: "12m 14s",
+    durationSeconds: 734,
+    rating: "PG-13",
+    imdbRating: 8.1,
+    year: 2025,
+    views: 1425000,
+    likes: 83200,
+    director: "Ian Hubert",
+    cast: ["Derek de Lint", "Sergio Hasselbaink", "Rogier Schippers", "Denise Rebergen"],
+    tags: ["Cyberpunk", "CGI", "Robots", "VFX Masterpiece", "Amsterdam"],
+    isFeatured: true
+  },
+  {
+    id: "sintel",
+    title: "Sintel",
+    description: "Sintel, a lonely young woman, encounters a wounded baby dragon which she names Scales. As they form an unbreakable bond, Sintel wanders through desolate canyons and dangerous cities on a legendary journey seeking the dragon after it is captured by a giant beast.",
+    category: "Fantasy",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800&auto=format&fit=crop&q=70",
+    duration: "14m 48s",
+    durationSeconds: 888,
+    rating: "PG",
+    imdbRating: 7.9,
+    year: 2024,
+    views: 890000,
+    likes: 47600,
+    director: "Colin Levy",
+    cast: ["Halina Reijn", "Thom Hoffman"],
+    tags: ["Magic", "Dragon", "Adventure", "Aesthetic Animation", "Emotional"],
+    isFeatured: false
+  },
+  {
+    id: "elephants-dream",
+    title: "Elephant's Dream",
+    description: "Explore the surreal machinery and clockwork corridors in the mind of Proog and Emo, two characters who traverse a chaotic digital playground where imagination merges with mechanical reality.",
+    category: "Sci-Fi",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ElephantsDream.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=800&auto=format&fit=crop&q=70",
+    duration: "10m 53s",
+    durationSeconds: 653,
+    rating: "PG-13",
+    imdbRating: 7.2,
+    year: 2023,
+    views: 640000,
+    likes: 31200,
+    director: "Bassam Kurdali",
+    cast: ["Tygo Gernandt", "Cas Jansen"],
+    tags: ["Surreal", "Steampunk", "Machinery", "Experimental"],
+    isFeatured: false
+  },
+  {
+    id: "big-buck-bunny",
+    title: "Big Buck Bunny",
+    description: "A large, warm-hearted forest rabbit wakes up to enjoy his tranquil routine only to find himself target of a trio of malicious, bullying forest squirrels. Watch his comical and creative setup of hilarious traps to reclaim peace and quiet.",
+    category: "Nature",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1470240731273-7821a6eeb6bd?w=800&auto=format&fit=crop&q=70",
+    duration: "9m 56s",
+    durationSeconds: 596,
+    rating: "G",
+    imdbRating: 8.3,
+    year: 2024,
+    views: 2854000,
+    likes: 194000,
+    director: "Sacha Goedegebure",
+    cast: ["Forest Wildlife Members"],
+    tags: ["Humor", "Nature", "Animals", "Classic", "Family"],
+    isFeatured: false
+  },
+  {
+    id: "bigger-escapes",
+    title: "For Bigger Escapes",
+    description: "Embark on an adrenaline-pumping journey up the sheer obsidian valley faces of Yosemite with veteran extreme climbers. Master gravity, celebrate the horizon, and live on the vertical edge.",
+    category: "Adventure",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1522163182402-834f871fd851?w=800&auto=format&fit=crop&q=70",
+    duration: "15s",
+    durationSeconds: 15,
+    rating: "G",
+    imdbRating: 7.5,
+    year: 2025,
+    views: 312000,
+    likes: 18400,
+    director: "Alex Honnold",
+    cast: ["Climbing Professionals"],
+    tags: ["Sports", "Climbing", "Extreme", "Yosemite", "Scenic"],
+    isFeatured: false
+  },
+  {
+    id: "bigger-blazes",
+    title: "For Bigger Blazes",
+    description: "A showcase of raw power and thermal beauty. Watch a high-definition cinematography series focusing on volcanic eruptions, controlled fire streams, and explosive pyro sparks.",
+    category: "Action",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1608889174637-3c44f6326f20?w=800&auto=format&fit=crop&q=70",
+    duration: "15s",
+    durationSeconds: 15,
+    rating: "PG",
+    imdbRating: 6.8,
+    year: 2024,
+    views: 245000,
+    likes: 9110,
+    director: "Niels Bohr",
+    cast: ["Pyrotechnic Specialists"],
+    tags: ["Fire", "Visual FX", "Action", "Experimental"],
+    isFeatured: false
+  },
+  {
+    id: "bigger-joyrides",
+    title: "For Bigger Joyrides",
+    description: "Get behind the wheel of supercharged track cars carving through sweeping ocean-side highways during sunset. Speed, dynamic tire tracks, and roaring engines set the pace.",
+    category: "Action",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerJoyrides.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1511919884226-fd3cad34687c?w=800&auto=format&fit=crop&q=70",
+    duration: "15s",
+    durationSeconds: 15,
+    rating: "G",
+    imdbRating: 7.0,
+    year: 2026,
+    views: 432000,
+    likes: 27900,
+    director: "Ken Block",
+    cast: ["Stunt Drivers"],
+    tags: ["Racing", "Sunsets", "Supercars", "Speed"],
+    isFeatured: false
+  },
+  {
+    id: "bigger-fun",
+    title: "For Bigger Fun",
+    description: "Take a colorful ride through futuristic digital toy lands. Built using glowing voxel engines and neon block designs, this short showcases next-generation creative simulations.",
+    category: "Fantasy",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1534447677768-be436bb09401?w=800&auto=format&fit=crop&q=70",
+    duration: "15s",
+    durationSeconds: 15,
+    rating: "G",
+    imdbRating: 7.1,
+    year: 2025,
+    views: 189000,
+    likes: 12100,
+    director: "Miyamoto San",
+    cast: ["Voxels Team"],
+    tags: ["Voxel", "Neon", "Creative", "Animation"],
+    isFeatured: false
+  },
+  {
+    id: "bigger-meltdowns",
+    title: "For Bigger Meltdowns",
+    description: "An evocative montage tracking the transition of solid ice structures to roaring liquid falls in the Arctic. Capturing ecological shifts in massive, awe-inspiring glacial sweeps.",
+    category: "Nature",
+    videoUrl: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerMeltdowns.mp4",
+    thumbnailUrl: "https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=800&auto=format&fit=crop&q=70",
+    duration: "15s",
+    durationSeconds: 15,
+    rating: "G",
+    imdbRating: 7.4,
+    year: 2024,
+    views: 310000,
+    likes: 17400,
+    director: "David Attenborough",
+    cast: ["Arctic Crew"],
+    tags: ["Arctic", "Nature", "Water", "Glacier", "Eco"],
+    isFeatured: false
+  }
+];
+
+export const MOCK_REVIEWS: Review[] = [
+  {
+    id: "r1",
+    videoId: "tears-of-steel",
+    userName: "Nova_Rider",
+    userAvatar: "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150&auto=format&fit=crop&q=80",
+    rating: 5,
+    comment: "This is visually stunning! The cyberpunk atmosphere is flawless, and the integration of live actors is incredible.",
+    timestamp: "2 hours ago"
+  },
+  {
+    id: "r2",
+    videoId: "tears-of-steel",
+    userName: "CinematicMage",
+    userAvatar: "https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80",
+    rating: 4,
+    comment: "One of the best sci-fi shorts of our time. The custom grading and giant robot mechanics look incredibly real.",
+    timestamp: "1 day ago"
+  },
+  {
+    id: "r3",
+    videoId: "sintel",
+    userName: "DragonHeart",
+    userAvatar: "https://images.unsplash.com/photo-1628157582853-a796fa650a6a?w=150&auto=format&fit=crop&q=80",
+    rating: 5,
+    comment: "I cry every single time I watch Sintel. Outstanding character design and an emotional roller coaster of music and visual story.",
+    timestamp: "3 days ago"
+  },
+  {
+    id: "r4",
+    videoId: "big-buck-bunny",
+    userName: "ComedyCutter",
+    userAvatar: "https://images.unsplash.com/photo-1570295999919-56ceb5ecca61?w=150&auto=format&fit=crop&q=80",
+    rating: 5,
+    comment: "An absolute animation classic! The traps are so funny and Bunny is the perfect hero. Watching this brings back great memories.",
+    timestamp: "Last week"
+  }
+];
