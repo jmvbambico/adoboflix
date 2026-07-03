@@ -66,6 +66,52 @@ const entryColumns = `id, name, type, category, poster, background_image, plot,
 	source_type, drm_type, drm_k, license_url, duration, user_agent, referer,
 	tmdb_id, created_at, updated_at`
 
+// --- Channel structs ---
+
+// Channel maps the public.channels table.
+type Channel struct {
+	ID           string     `db:"id" json:"id"`
+	Name         string     `db:"name" json:"name"`
+	Logo         *string    `db:"logo" json:"logo,omitempty"`
+	Category     *string    `db:"category" json:"category,omitempty"`
+	EpgSourceID  *string    `db:"epg_source_id" json:"epg_source_id,omitempty"`
+	EpgChannelID *string    `db:"epg_channel_id" json:"epg_channel_id,omitempty"`
+	Status       string     `db:"status" json:"status"`
+	CreatedAt    *time.Time `db:"created_at" json:"created_at,omitempty"`
+	UpdatedAt    *time.Time `db:"updated_at" json:"updated_at,omitempty"`
+}
+
+// Stream maps the public.streams table.
+type Stream struct {
+	ID          string     `db:"id" json:"id"`
+	ChannelID   string     `db:"channel_id" json:"channel_id"`
+	Label       string     `db:"label" json:"label"`
+	URL         string     `db:"url" json:"url"`
+	SourceType  string     `db:"source_type" json:"source_type"`
+	DrmType     *string    `db:"drm_type" json:"drm_type,omitempty"`
+	DrmK        *string    `db:"drm_k" json:"drm_k,omitempty"`
+	LicenseURL  *string    `db:"license_url" json:"license_url,omitempty"`
+	IsDefault   bool       `db:"is_default" json:"is_default"`
+	Status      string     `db:"status" json:"status"`
+	UserAgent   *string    `db:"user_agent" json:"user_agent,omitempty"`
+	Referer     *string    `db:"referer" json:"referer,omitempty"`
+	Resolution  *string    `db:"resolution" json:"resolution,omitempty"`
+	Bitrate     *int       `db:"bitrate" json:"bitrate,omitempty"`
+	CreatedAt   *time.Time `db:"created_at" json:"created_at,omitempty"`
+}
+
+// ChannelStream wraps a channel with its streams.
+type ChannelStream struct {
+	Channel `json:"channel"`
+	Streams []Stream `json:"streams"`
+}
+
+// PlaylistWithChannels wraps a playlist with its channels.
+type PlaylistChannelResult struct {
+	Channel
+	PlaylistName *string `db:"playlist_name" json:"playlist_name,omitempty"`
+}
+
 type Stats struct {
 	TotalTitles    int `json:"total_titles"`
 	TotalProviders int `json:"total_providers"`
@@ -230,4 +276,92 @@ func (db *DB) GetEpisode(episodeID string) (*Episode, error) {
 		return nil, err
 	}
 	return &e, nil
+}
+
+// channelColumns lists columns for channel queries.
+const channelColumns = `id, name, logo, category, epg_source_id, epg_channel_id,
+	status, created_at, updated_at`
+
+// streamColumns lists columns for stream queries.
+const streamColumns = `id, channel_id, label, url, source_type, drm_type, drm_k,
+	license_url, is_default, status, user_agent, referer, resolution, bitrate, created_at`
+
+// ListChannels returns channels, optionally filtered by category.
+func (db *DB) ListChannels(category string, limit, offset int) ([]Channel, int, error) {
+	args := []interface{}{}
+	where := "WHERE 1=1"
+	if category != "" && category != "All" {
+		where += " AND category = $" + strconv.Itoa(len(args)+1)
+		args = append(args, category)
+	}
+
+	var total int
+	if err := db.QueryRow("SELECT COUNT(*) FROM channels "+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	channels := []Channel{}
+	query := "SELECT " + channelColumns + " FROM channels " + where +
+		" ORDER BY category NULLS LAST, name LIMIT $" + strconv.Itoa(len(args)+1) +
+		" OFFSET $" + strconv.Itoa(len(args)+2)
+	args = append(args, limit, offset)
+
+	if err := db.Select(&channels, query, args...); err != nil {
+		return nil, 0, err
+	}
+	return channels, total, nil
+}
+
+// GetChannel returns a single channel by ID.
+func (db *DB) GetChannel(channelID string) (*Channel, error) {
+	var c Channel
+	if err := db.Get(&c, "SELECT "+channelColumns+" FROM channels WHERE id = $1", channelID); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+// GetChannelWithStreams returns a channel and all its streams ordered by is_default DESC.
+func (db *DB) GetChannelWithStreams(channelID string) (*Channel, []Stream, error) {
+	c, err := db.GetChannel(channelID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	streams := []Stream{}
+	query := "SELECT " + streamColumns + " FROM streams WHERE channel_id = $1 ORDER BY is_default DESC, bitrate DESC NULLS LAST"
+	if err := db.Select(&streams, query, channelID); err != nil {
+		return nil, nil, err
+	}
+	return c, streams, nil
+}
+
+// ListChannelCategories returns distinct channel categories.
+func (db *DB) ListChannelCategories() ([]string, error) {
+	var cats []string
+	if err := db.Select(&cats, `SELECT DISTINCT category FROM channels WHERE category IS NOT NULL AND category != '' ORDER BY category`); err != nil {
+		return nil, err
+	}
+	return cats, nil
+}
+
+// ResolveChannelStream returns the default stream for a channel, with fallback to the first active stream.
+func (db *DB) ResolveChannelStream(channelID string) (*Stream, error) {
+	var s Stream
+	// Try default stream first
+	query := "SELECT " + streamColumns + " FROM streams WHERE channel_id = $1 AND is_default = true LIMIT 1"
+	if err := db.Get(&s, query, channelID); err == nil {
+		return &s, nil
+	}
+	// Fallback: first active stream
+	query = "SELECT " + streamColumns + " FROM streams WHERE channel_id = $1 AND status = 'active' LIMIT 1"
+	if err := db.Get(&s, query, channelID); err == nil {
+		return &s, nil
+	}
+	// Fallback: any stream at all
+	query = "SELECT " + streamColumns + " FROM streams WHERE channel_id = $1 ORDER BY is_default DESC LIMIT 1"
+	if err := db.Get(&s, query, channelID); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

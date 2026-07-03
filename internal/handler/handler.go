@@ -10,14 +10,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/db"
+	"github.com/jmvbambico/adoboflix/internal/epg"
 )
 
 type PlayerHandler struct {
-	db *db.DB
+	db  *db.DB
+	epg *epg.Service
 }
 
 func NewPlayerHandler(database *db.DB) *PlayerHandler {
 	return &PlayerHandler{db: database}
+}
+
+func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
+	h.epg = service
+	return h
 }
 
 func (h *PlayerHandler) GetStats(c *gin.Context) {
@@ -128,8 +135,24 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	fullURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
+
+	ua := ""
+	if entry.UserAgent != nil {
+		ua = *entry.UserAgent
+	}
+	ref := ""
+	if entry.Referer != nil {
+		ref = *entry.Referer
+	}
+
+	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
 		scheme, c.Request.Host, url.QueryEscape(*entry.StreamURL), entry.SourceType)
+	if ua != "" {
+		proxyURL += "&ua=" + url.QueryEscape(ua)
+	}
+	if ref != "" {
+		proxyURL += "&ref=" + url.QueryEscape(ref)
+	}
 
 	drmType := ""
 	if entry.DrmType != nil {
@@ -145,8 +168,9 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"url": fullURL, "provider": entry.SourceType,
+		"url": proxyURL, "provider": entry.SourceType,
 		"drm_type": drmType, "drm_k": drmK, "license_url": licenseURL,
+		"user_agent": ua, "referer": ref,
 	})
 }
 
@@ -196,8 +220,24 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	fullURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
+
+	epUA := ""
+	if episode.UserAgent != nil {
+		epUA = *episode.UserAgent
+	}
+	epRef := ""
+	if episode.Referer != nil {
+		epRef = *episode.Referer
+	}
+
+	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
 		scheme, c.Request.Host, url.QueryEscape(*episode.StreamURL), episode.SourceType)
+	if epUA != "" {
+		proxyURL += "&ua=" + url.QueryEscape(epUA)
+	}
+	if epRef != "" {
+		proxyURL += "&ref=" + url.QueryEscape(epRef)
+	}
 
 	// Check for per-episode DRM
 	drmType := ""
@@ -214,11 +254,13 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"url":         fullURL,
+		"url":         proxyURL,
 		"provider":    episode.SourceType,
 		"drm_type":    drmType,
 		"drm_k":       drmK,
 		"license_url": licenseURL,
+		"user_agent":  epUA,
+		"referer":     epRef,
 	})
 }
 
@@ -310,4 +352,95 @@ func (h *PlayerHandler) ProxyStream(c *gin.Context) {
 
 	c.Status(resp.StatusCode)
 	io.Copy(c.Writer, resp.Body)
+}
+
+func (h *PlayerHandler) ListChannels(c *gin.Context) {
+	category := c.Query("category")
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+
+	channels, total, err := h.db.ListChannels(category, limit, (page-1)*limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"channels": channels, "total": total, "page": page})
+}
+
+func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
+	cats, err := h.db.ListChannelCategories()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"categories": cats})
+}
+
+func (h *PlayerHandler) GetChannel(c *gin.Context) {
+	id := c.Param("id")
+	channel, streams, err := h.db.GetChannelWithStreams(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"channel": channel, "streams": streams})
+}
+
+func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
+	id := c.Param("id")
+	stream, err := h.db.ResolveChannelStream(id)
+	if err != nil || stream == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Stream not found"})
+		return
+	}
+
+	scheme := "http"
+	if c.Request.TLS != nil {
+		scheme = "https"
+	}
+	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
+		scheme, c.Request.Host, url.QueryEscape(stream.URL), stream.SourceType)
+
+	drmType := ""
+	if stream.DrmType != nil {
+		drmType = *stream.DrmType
+	}
+	drmK := ""
+	if stream.DrmK != nil {
+		drmK = *stream.DrmK
+	}
+	licenseURL := ""
+	if stream.LicenseURL != nil {
+		licenseURL = *stream.LicenseURL
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"url":         proxyURL,
+		"provider":    stream.SourceType,
+		"drm_type":    drmType,
+		"drm_k":       drmK,
+		"license_url": licenseURL,
+	})
+}
+
+func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
+	id := c.Param("id")
+	channel, err := h.db.GetChannel(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		return
+	}
+
+	if channel.EpgChannelID == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no EPG channel id configured"})
+		return
+	}
+
+	result := h.epg.GetForChannel(*channel.EpgChannelID)
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *PlayerHandler) ScanChannels(c *gin.Context) {
+	c.JSON(http.StatusNotImplemented, gin.H{"message": "scan not implemented"})
 }

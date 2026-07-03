@@ -4,19 +4,40 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"github.com/jmvbambico/adoboflix/internal/db"
+	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
 )
 
 func main() {
+	// Defaults can be overridden by SERVER_HOST / SERVER_PORT env vars or CLI flags.
+	defaultHost := "0.0.0.0"
+	defaultPort := 5656
+	if v := os.Getenv("SERVER_HOST"); v != "" {
+		defaultHost = v
+	}
+	if v := os.Getenv("SERVER_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			defaultPort = n
+		}
+	}
+
 	var (
-		host = flag.String("host", "127.0.0.1", "Bind address")
-		port = flag.Int("port", 5656, "Port")
+		host = flag.String("host", defaultHost, "Bind address")
+		port = flag.Int("port", defaultPort, "Port")
 	)
 	flag.Parse()
+
+	// Load .env if present (non-fatal if missing)
+	if err := godotenv.Load(); err != nil {
+		log.Printf("[env] no .env file found, using environment variables")
+	}
 
 	// Initialize database connection
 	database, err := db.Connect()
@@ -24,6 +45,9 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// Initialize EPG service (non-fatal if compiled_epg is empty)
+	epgService := epg.NewService(database)
 
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
@@ -33,7 +57,7 @@ func main() {
 	r.Use(middleware.CORS())
 
 	// Initialize handlers
-	playerHandler := handler.NewPlayerHandler(database)
+	playerHandler := handler.NewPlayerHandler(database).WithEPG(epgService)
 
 	// API routes
 	api := r.Group("/api/v1")
@@ -48,6 +72,14 @@ func main() {
 		api.GET("/proxy", playerHandler.ProxyStream)
 		api.GET("/episodes/:vodId", playerHandler.GetEpisodes)
 		api.GET("/resolve/episode/:episodeId", playerHandler.ResolveEpisode)
+
+		// Channel routes
+		api.GET("/channels", playerHandler.ListChannels)
+		api.GET("/channels/categories", playerHandler.GetChannelCategories)
+		api.GET("/channels/:id", playerHandler.GetChannel)
+		api.GET("/channels/:id/resolve", playerHandler.ResolveChannelStream)
+		api.GET("/channels/:id/epg", playerHandler.GetChannelEPG)
+		api.POST("/channels/scan", playerHandler.ScanChannels)
 	}
 
 	// Serve built client assets
@@ -60,7 +92,7 @@ func main() {
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 
 	fmt.Printf("\n🎬 AdoboFlix: http://%s\n", addr)
-	fmt.Printf("📚 Browse your media library, search, and stream with DRM support\n\n")
+	fmt.Printf("📺 IPTV Channels, VOD with DRM support, and EPG\n\n")
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)

@@ -49,6 +49,8 @@ export interface ResolvedStream {
   drm_type: string;
   drm_k: string;
   license_url: string;
+  user_agent?: string;
+  referer?: string;
 }
 
 interface EpisodesResponse {
@@ -174,4 +176,97 @@ export async function fetchEpisodes(vodId: string): Promise<Episode[]> {
 // Resolve a specific episode's stream.
 export async function resolveEpisode(episodeId: string): Promise<ResolvedStream> {
   return getJSON<ResolvedStream>(`${API_BASE}/resolve/episode/${encodeURIComponent(episodeId)}`);
+}
+
+// ── IPTV Channel API ───────────────────────────────────────────────
+
+export interface BackendChannel {
+  id: string;
+  name: string;
+  logo?: string;
+  category?: string;
+  epg_source_id?: string;
+  epg_channel_id?: string;
+  status: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+interface ChannelsResponse {
+  channels: BackendChannel[];
+  total: number;
+  page: number;
+  has_more: boolean;
+}
+
+export interface ResolvedChannelStream {
+  url: string;
+  provider: string;
+  source_type: string;
+  drm_type: string;
+  drm_k: string;
+  license_url: string;
+  user_agent: string;
+  referer: string;
+  label: string;
+  resolution: string;
+}
+
+export async function fetchChannels(params: {
+  category?: string;
+  limit?: number;
+  search?: string;
+}): Promise<BackendChannel[]> {
+  const { category, limit = 500, search } = params;
+  const qs = new URLSearchParams();
+  qs.set("limit", String(limit));
+  if (category && category !== "All") qs.set("category", category);
+  const data = await getJSON<ChannelsResponse>(`${API_BASE}/channels?${qs}`);
+  let channels = data.channels;
+  // Client-side name filter (backend doesn't support search yet)
+  if (search && search.trim()) {
+    const q = search.trim().toLowerCase();
+    channels = channels.filter(c => c.name.toLowerCase().includes(q));
+  }
+  return channels;
+}
+
+export async function fetchChannelCategories(): Promise<string[]> {
+  const data = await getJSON<{ categories: string[] }>(`${API_BASE}/channels/categories`);
+  return ["All", ...data.categories];
+}
+
+export async function resolveChannelStream(channelId: string): Promise<ResolvedChannelStream> {
+  return getJSON<ResolvedChannelStream>(`${API_BASE}/channels/${encodeURIComponent(channelId)}/resolve`);
+}
+
+// ── EPG (Electronic Programme Guide) ──────────────────────────────────────────
+
+export interface EPGProgramme {
+  channel_id: string;
+  title: string;
+  description?: string;
+  start: string;       // XMLTV raw "20260624080000 +0800"
+  stop: string;        // XMLTV raw
+  start_unix: number;  // Unix timestamp
+  stop_unix: number;   // Unix timestamp
+}
+
+export interface ChannelEPG {
+  epg_channel_id: string;
+  channel_name?: string;
+  current?: EPGProgramme;
+  next?: EPGProgramme;
+  upcoming?: EPGProgramme[];
+}
+
+export async function fetchChannelEPG(channelId: string): Promise<ChannelEPG | null> {
+  try {
+    const res = await fetch(`${API_BASE}/channels/${encodeURIComponent(channelId)}/epg`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.epg ?? null;
+  } catch {
+    return null;
+  }
 }

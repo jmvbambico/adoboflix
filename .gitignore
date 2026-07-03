@@ -32,3 +32,7 @@ static/
 # OS
 .DS_Store
 Thumbs.db
+.gitnexus
+
+.claude/
+CLAUDE.md

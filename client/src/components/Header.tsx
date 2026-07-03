@@ -4,7 +4,7 @@
  */
 
 import React from "react";
-import { Sparkles, Library, PlayCircle, Clock, Heart, Search, User, Compass } from "lucide-react";
+import { Heart, Search, User, Compass } from "lucide-react";
 
 interface HeaderProps {
   searchQuery: string;
@@ -25,22 +25,22 @@ export default function Header({
 }: HeaderProps) {
   return (
     <header className="sticky top-0 z-40 w-full px-4 md:px-8 py-4 bg-[#050505]/70 backdrop-blur-md border-b border-white/5 transition-all">
-      <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
-        {/* Brand Logo with cinematic neon pulse styling */}
+      <div className="w-full flex flex-col md:flex-row items-center justify-between gap-4">
+        {/* Brand Logo */}
         <div 
           onClick={onNavigateToLibrary}
           className="flex items-center gap-2.5 cursor-pointer group"
         >
-          <div className="relative flex items-center justify-center w-10 h-10 rounded-xl bg-gradient-to-tr from-orange-600 to-amber-400 p-[1px] shadow-[0_0_20px_-3px_rgba(249,115,22,0.5)]">
-            <div className="w-full h-full bg-[#050505] rounded-[11px] flex items-center justify-center group-hover:bg-transparent transition-all duration-300">
-              <Sparkles className="w-5 h-5 text-orange-400 group-hover:text-slate-950 transition-colors" />
-            </div>
-          </div>
+          <img
+            src="/logo.webp"
+            alt="AdoboFlix"
+            className="w-10 h-10 rounded-xl object-cover border border-white/10 group-hover:border-orange-500/30 transition-all duration-300"
+          />
           <div className="flex flex-col">
             <span className="font-display font-extrabold text-lg tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-white via-slate-100 to-slate-400">
-              GLASS<span className="text-orange-500">STREAM</span>
+              Adobo<span className="text-orange-500">Flix</span>
             </span>
-            <span className="text-[9px] text-orange-400 font-mono tracking-widest -mt-1 uppercase">Ambient Lab v1.0</span>
+            <span className="text-[9px] text-orange-400 font-mono tracking-widest -mt-1 uppercase">Premium Streaming</span>
           </div>
         </div>
 
@@ -73,7 +73,7 @@ export default function Header({
             className="relative p-2 rounded-xl bg-white/5 border border-white/5 hover:border-orange-500/20 hover:bg-orange-600/10 text-slate-300 hover:text-orange-400 transition-all flex items-center gap-1.5"
             title="My Watchlist"
           >
-            <Heart className="w-4 h-4 fill-current text-transparent hover:text-orange-400 transition-colors" />
+            <Heart className="w-4 h-4 fill-current" />
             <span className="text-xs hidden sm:inline font-medium">Watchlist</span>
             {watchlistCount > 0 && (
               <span className="absolute -top-1.5 -right-1.5 min-w-4 h-4 bg-orange-600 text-white font-mono text-[9px] px-1 rounded-full flex items-center justify-center font-bold shadow-lg animate-pulse">

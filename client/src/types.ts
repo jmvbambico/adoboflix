@@ -24,6 +24,8 @@ export interface Video {
   drmK?: string;
   licenseUrl?: string;
   streamUrl?: string;
+  userAgent?: string;
+  referer?: string;
 }
 
 export interface Episode {
@@ -60,4 +62,24 @@ export interface WatchHistoryItem {
   watchedAt: string; // ISO date
   progress: number; // percentage completed
   currentTime: number; // current timestamp in seconds
+}
+
+// ── EPG (Electronic Programme Guide) ──────────────────────────────────────────
+
+export interface EPGProgramme {
+  channel_id: string;
+  title: string;
+  description?: string;
+  start: string;       // XMLTV raw "20260624080000 +0800"
+  stop: string;        // XMLTV raw
+  start_unix: number;  // Unix timestamp
+  stop_unix: number;   // Unix timestamp
+}
+
+export interface ChannelEPG {
+  epg_channel_id: string;
+  channel_name?: string;
+  current?: EPGProgramme;
+  next?: EPGProgramme;
+  upcoming?: EPGProgramme[];
 }

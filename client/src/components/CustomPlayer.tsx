@@ -2,11 +2,12 @@ import React, { useRef, useState, useEffect } from "react";
 import {
   Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize2, Minimize2,
   Settings, Zap, CircleCheck, Tv, RefreshCw, Volume1,
-  SkipBack, SkipForward
+  SkipBack, SkipForward, List, ChevronDown
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 // @ts-ignore
 import shaka from 'shaka-player/dist/shaka-player.ui.js';
+import { Episode } from "../types";
 
 interface CustomPlayerProps {
   id: string;
@@ -32,6 +33,12 @@ interface CustomPlayerProps {
   hasNextEpisode?: boolean;
   onPrevEpisode?: () => void;
   onNextEpisode?: () => void;
+  // Episode drawer support
+  episodes?: Episode[];
+  currentEpisode?: Episode | null;
+  selectedSeason?: number;
+  onSelectSeason?: (season: number) => void;
+  onPlayEpisode?: (episode: Episode) => void;
 }
 
 const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
@@ -59,7 +66,12 @@ export default function CustomPlayer({
   hasPrevEpisode,
   hasNextEpisode,
   onPrevEpisode,
-  onNextEpisode
+  onNextEpisode,
+  episodes,
+  currentEpisode,
+  selectedSeason,
+  onSelectSeason,
+  onPlayEpisode,
 }: CustomPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const shakaRef = useRef<any>(null);
@@ -80,6 +92,7 @@ export default function CustomPlayer({
   const [isTheater, setIsTheater] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  const [showEpisodes, setShowEpisodes] = useState(false);
   const [bubbleAction, setBubbleAction] = useState<"play" | "pause" | "forward" | "rewind" | null>(null);
   const [errorLoading, setErrorLoading] = useState(false);
   const FALLBACK_POSTER = "https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=800&auto=format&fit=crop&q=80";
@@ -97,8 +110,7 @@ export default function CustomPlayer({
     let isMounted = true;
 
     const BACKEND_HOST = window.location.hostname;
-    const BACKEND_PORT = '5656';
-    const BACKEND_BASE = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
+    const BACKEND_BASE = window.location.origin;
 
     // Extract the original CDN URL and source type from the proxy URL.
     // We pass the ORIGINAL CDN URL to Shaka so that relative segment
@@ -133,7 +145,7 @@ export default function CustomPlayer({
     player = new shaka.Player();
     shakaRef.current = player;
 
-    // attach() was separated from the constructor in v4.x; constructor-based
+    // Override the response URI for manifest requests so Shaka
     // init is deprecated and will be removed in v5.0.
     // @ts-ignore
     player.attach(videoRef.current)
@@ -537,7 +549,7 @@ export default function CustomPlayer({
       onMouseMove={triggerShowControls}
       onMouseLeave={() => isPlaying && setShowControls(false)}
       className={`relative w-full rounded-2xl overflow-hidden glass-panel group shadow-2xl transition-all duration-500 select-none ${
-        isTheater && !isFullscreen ? "max-w-[100%] aspect-[21/9]" : "max-w-5xl aspect-video"
+        isTheater && !isFullscreen ? "max-w-[100%] aspect-[21/9]" : "w-full aspect-video"
       }`}
     >
       {/* Background Poster (skeletal background before playback) */}
@@ -614,6 +626,108 @@ export default function CustomPlayer({
         )}
       </AnimatePresence>
 
+      {/* Episode Drawer Overlay */}
+      <AnimatePresence>
+        {showEpisodes && type === "Series" && (
+          <motion.div
+            initial={{ opacity: 0, y: 40 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 40 }}
+            transition={{ duration: 0.25, ease: "easeOut" }}
+            className="absolute bottom-0 inset-x-0 z-20 max-h-[55%] bg-slate-950/95 backdrop-blur-xl border-t border-white/10 rounded-t-2xl overflow-hidden flex flex-col pointer-events-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Drawer header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-white/5 shrink-0">
+              <span className="text-xs font-display font-semibold text-slate-200 flex items-center gap-2">
+                <List className="w-4 h-4 text-purple-400" />
+                Episodes & Seasons
+              </span>
+              <button
+                onClick={() => setShowEpisodes(false)}
+                className="p-1 hover:bg-white/10 rounded-lg transition-all text-slate-400 hover:text-slate-200"
+              >
+                <ChevronDown className="w-4 h-4" />
+              </button>
+            </div>
+
+            {!episodes || episodes.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center gap-2 py-12 text-slate-500">
+                <List className="w-8 h-8 text-slate-600" />
+                <span className="text-xs font-medium">No episodes configured for this series yet</span>
+                <span className="text-[10px] font-mono text-slate-600">Episode data will appear here once available</span>
+              </div>
+            ) : (
+              <>
+                {/* Season tabs */}
+                {(() => {
+                  const seasons = [...new Set(episodes.map(e => e.season_number))].sort();
+                  if (seasons.length <= 1) return null;
+                  return (
+                    <div className="flex items-center gap-1.5 px-4 pt-3 pb-2 overflow-x-auto no-scrollbar shrink-0">
+                      {seasons.map(s => (
+                        <button
+                          key={s}
+                          onClick={() => onSelectSeason?.(s)}
+                          className={`px-3 py-1 rounded-lg text-[10px] font-semibold tracking-wide border whitespace-nowrap transition-all ${
+                            (selectedSeason || seasons[0]) === s
+                              ? "bg-purple-500/25 text-purple-300 border-purple-400/35"
+                              : "bg-white/5 border-white/5 text-slate-400 hover:bg-white/10"
+                          }`}
+                        >
+                          Season {s}
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })()}
+
+                {/* Episode list */}
+                <div className="flex-1 overflow-y-auto px-4 pb-4 pt-1 space-y-1 custom-scrollbar">
+                  {episodes
+                    .filter(e => e.season_number === (selectedSeason || [...new Set(episodes.map(x => x.season_number))].sort()[0]))
+                    .sort((a, b) => a.episode_number - b.episode_number)
+                    .map((ep) => {
+                      const isCurrent = currentEpisode?.id === ep.id;
+                      return (
+                        <div
+                          key={ep.id}
+                          onClick={() => { onPlayEpisode?.(ep); setShowEpisodes(false); }}
+                          className={`flex items-center gap-3 px-3 py-2.5 rounded-xl cursor-pointer transition-all ${
+                            isCurrent
+                              ? "bg-purple-500/15 border border-purple-500/30"
+                              : "hover:bg-white/5 border border-transparent"
+                          }`}
+                        >
+                          <div className={`w-7 h-7 shrink-0 rounded-lg flex items-center justify-center text-[10px] font-mono font-bold ${
+                            isCurrent
+                              ? "bg-purple-500/30 text-purple-300"
+                              : "bg-slate-800 text-slate-400"
+                          }`}>
+                            {isCurrent ? <Play className="w-3 h-3 fill-current" /> : ep.episode_number}
+                          </div>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className={`text-xs font-medium truncate ${isCurrent ? "text-purple-300" : "text-slate-200"}`}>
+                              {ep.name || `Episode ${ep.episode_number}`}
+                            </span>
+                            <span className="text-[9px] font-mono text-slate-500">
+                              S{ep.season_number} E{ep.episode_number}
+                              {ep.drm_type && <span className="ml-2 text-red-400">DRM {ep.drm_type}</span>}
+                            </span>
+                          </div>
+                          {isCurrent && (
+                            <span className="text-[8px] font-mono text-purple-400 animate-pulse shrink-0">▶ NOW</span>
+                          )}
+                        </div>
+                      );
+                    })}
+                </div>
+              </>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Gradient Vignette */}
       <div className={`absolute inset-0 bg-gradient-to-t from-black/90 via-transparent to-black/40 transition-opacity duration-500 pointer-events-none z-10 ${
         showControls ? "opacity-100" : "opacity-0"
@@ -675,6 +789,20 @@ export default function CustomPlayer({
                   <span className="w-1.5 h-1.5 rounded-full bg-red-650 animate-ping" />
                   LIVE
                 </span>
+              )}
+              {type === "Series" && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); setShowEpisodes(!showEpisodes); }}
+                  className={`text-[10px] font-mono font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-all border cursor-pointer ${
+                    showEpisodes
+                      ? "bg-purple-500/30 text-purple-200 border-purple-400/40"
+                      : "bg-white/10 text-slate-300 border-white/10 hover:bg-white/20"
+                  }`}
+                >
+                  <List className="w-3 h-3" />
+                  Episodes{episodes && episodes.length > 0 ? ` (${episodes.length})` : ""}
+                  <ChevronDown className={`w-3 h-3 transition-transform ${showEpisodes ? "rotate-180" : ""}`} />
+                </button>
               )}
             </div>
           </motion.div>

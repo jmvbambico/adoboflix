@@ -12,12 +12,11 @@ export default defineConfig(() => {
       },
     },
     server: {
+      port: process.env.VITE_PORT ? Number(process.env.VITE_PORT) : 3000,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
-      // Proxy API calls to the Go backend (AdoboTV PostgreSQL) during dev.
+      // Proxy API calls to the Go backend during dev.
       proxy: {
         '/api': {
           target: process.env.ADOBOFLIX_API || 'http://127.0.0.1:5656',
