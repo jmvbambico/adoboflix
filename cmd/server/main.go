@@ -82,10 +82,19 @@ func main() {
 		api.POST("/channels/scan", playerHandler.ScanChannels)
 	}
 
-	// Serve built client assets
+	// Serve built client assets.
+	// Static files (JS, CSS, images, etc.) are served directly from ./static.
+	// Any path not matched by a route or static file falls back to index.html (SPA).
 	r.Static("/assets", "./static/assets")
 	r.StaticFile("/", "./static/index.html")
 	r.NoRoute(func(c *gin.Context) {
+		// Serve real static files (e.g. /logo.webp, /favicon.ico) if they exist.
+		// Fall back to index.html for SPA client-side routes.
+		path := "./static" + c.Request.URL.Path
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			c.File(path)
+			return
+		}
 		c.File("./static/index.html")
 	})
 
