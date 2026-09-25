@@ -118,6 +118,45 @@ func (h *PlayerHandler) GetGenres(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"genres": genres})
 }
 
+// derefString safely unwraps a nullable *string into a plain string.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// buildProxyURL wraps a raw stream URL through /api/v1/proxy exactly the way
+// resolve has always done: QueryEscape the url, append &source=, then optional
+// &ua= / &ref= when the stream carries its own headers.
+func buildProxyURL(scheme, host, rawURL, sourceType, ua, ref string) string {
+	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
+		scheme, host, url.QueryEscape(rawURL), sourceType)
+	if ua != "" {
+		proxyURL += "&ua=" + url.QueryEscape(ua)
+	}
+	if ref != "" {
+		proxyURL += "&ref=" + url.QueryEscape(ref)
+	}
+	return proxyURL
+}
+
+// resolveAlternate is one non-primary stream from vod_streams, already wrapped
+// through the proxy so it is directly playable. Additive field on /api/v1/resolve.
+type resolveAlternate struct {
+	URL        string `json:"url"`
+	Provider   string `json:"provider"`
+	SourceType string `json:"source_type"`
+	DrmType    string `json:"drm_type"`
+	DrmK       string `json:"drm_k"`
+	LicenseURL string `json:"license_url"`
+	UserAgent  string `json:"user_agent"`
+	Referer    string `json:"referer"`
+	Label      string `json:"label"`
+	Resolution string `json:"resolution,omitempty"`
+	Bitrate    *int   `json:"bitrate,omitempty"`
+}
+
 func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	id := c.Query("id")
 	if id == "" {
@@ -126,7 +165,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	}
 
 	entry, err := h.db.GetEntry(id)
-	if err != nil || entry.StreamURL == nil {
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
 		return
 	}
@@ -136,41 +175,64 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 		scheme = "https"
 	}
 
-	ua := ""
-	if entry.UserAgent != nil {
-		ua = *entry.UserAgent
-	}
-	ref := ""
-	if entry.Referer != nil {
-		ref = *entry.Referer
+	// Prefer the authoritative vod_streams rows; fall back silently to the
+	// denormalized vod_assets.stream_url cache when the asset has none.
+	vodStreams, streamErr := h.db.GetVodStreams(entry.ID)
+	if streamErr == nil && len(vodStreams) > 0 {
+		primary := vodStreams[0]
+
+		// Per-stream headers: these CDNs reject requests with the wrong
+		// Referer, so each stream carries its own user_agent/referer.
+		ua := derefString(primary.UserAgent)
+		ref := derefString(primary.Referer)
+		proxyURL := buildProxyURL(scheme, c.Request.Host, primary.URL, primary.SourceType, ua, ref)
+
+		alternates := make([]resolveAlternate, 0, len(vodStreams)-1)
+		for _, s := range vodStreams[1:] {
+			altUA := derefString(s.UserAgent)
+			altRef := derefString(s.Referer)
+			alternates = append(alternates, resolveAlternate{
+				URL:        buildProxyURL(scheme, c.Request.Host, s.URL, s.SourceType, altUA, altRef),
+				Provider:   s.SourceType,
+				SourceType: s.SourceType,
+				DrmType:    derefString(s.DrmType),
+				DrmK:       derefString(s.DrmK),
+				LicenseURL: derefString(s.LicenseURL),
+				UserAgent:  altUA,
+				Referer:    altRef,
+				Label:      s.Label,
+				Resolution: derefString(s.Resolution),
+				Bitrate:    s.Bitrate,
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"url": proxyURL, "provider": primary.SourceType,
+			"drm_type": derefString(primary.DrmType), "drm_k": derefString(primary.DrmK),
+			"license_url": derefString(primary.LicenseURL),
+			"user_agent": ua, "referer": ref,
+			"alternates": alternates,
+		})
+		return
 	}
 
-	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
-		scheme, c.Request.Host, url.QueryEscape(*entry.StreamURL), entry.SourceType)
-	if ua != "" {
-		proxyURL += "&ua=" + url.QueryEscape(ua)
-	}
-	if ref != "" {
-		proxyURL += "&ref=" + url.QueryEscape(ref)
+	// Fallback: asset has no vod_streams rows (or the lookup failed) — play
+	// the cached vod_assets.stream_url, exactly as before.
+	if entry.StreamURL == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
+		return
 	}
 
-	drmType := ""
-	if entry.DrmType != nil {
-		drmType = *entry.DrmType
-	}
-	drmK := ""
-	if entry.DrmK != nil {
-		drmK = *entry.DrmK
-	}
-	licenseURL := ""
-	if entry.LicenseURL != nil {
-		licenseURL = *entry.LicenseURL
-	}
+	ua := derefString(entry.UserAgent)
+	ref := derefString(entry.Referer)
+	proxyURL := buildProxyURL(scheme, c.Request.Host, *entry.StreamURL, entry.SourceType, ua, ref)
 
 	c.JSON(http.StatusOK, gin.H{
 		"url": proxyURL, "provider": entry.SourceType,
-		"drm_type": drmType, "drm_k": drmK, "license_url": licenseURL,
+		"drm_type": derefString(entry.DrmType), "drm_k": derefString(entry.DrmK),
+		"license_url": derefString(entry.LicenseURL),
 		"user_agent": ua, "referer": ref,
+		"alternates": []resolveAlternate{},
 	})
 }
 
