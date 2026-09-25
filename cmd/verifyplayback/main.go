@@ -189,43 +189,285 @@ type report struct {
 // --- manifest parsing -------------------------------------------------------
 
 var (
-	hlsMapURIRe   = regexp.MustCompile(`#EXT-X-MAP:[^\r\n]*URI="([^"]+)"`)
-	dashBaseURLRe = regexp.MustCompile(`<BaseURL>\s*([^<]+?)\s*</BaseURL>`)
-	segURLMediaRe = regexp.MustCompile(`<SegmentURL\b[^>]*?\bmedia\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	initSourceRe  = regexp.MustCompile(`<Initialization\b[^>]*?\bsourceURL\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	tmplMediaRe   = regexp.MustCompile(`<SegmentTemplate\b[^>]*?\bmedia\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	tmplInitRe    = regexp.MustCompile(`<SegmentTemplate\b[^>]*?\binitialization\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	repIDAttrRe   = regexp.MustCompile(`<Representation\b[^>]*?\bid\s*=\s*(?:"([^"]*)"|'([^']*)')`)
-	tmplNumberRe  = regexp.MustCompile(`\$Number(%[^$]*)?\$`)
-	tmplTimeRe    = regexp.MustCompile(`\$Time(%[^$]*)?\$`)
-	tmplRepIDRe   = regexp.MustCompile(`\$RepresentationID(%[^$]*)?\$`)
-	tmplOtherRe   = regexp.MustCompile(`\$[^$\s"']+\$`)
-	fileExtRe     = regexp.MustCompile(`\.[A-Za-z0-9]{1,8}$`)
+	hlsMapURIRe  = regexp.MustCompile(`#EXT-X-MAP:[^\r\n]*URI="([^"]+)"`)
+	tmplNumberRe = regexp.MustCompile(`\$Number(%[^$]*)?\$`)
+	tmplTimeRe   = regexp.MustCompile(`\$Time(%[^$]*)?\$`)
+	tmplRepIDRe  = regexp.MustCompile(`\$RepresentationID(%[^$]*)?\$`)
+	tmplOtherRe  = regexp.MustCompile(`\$[^$\s"']+\$`)
+	fileExtRe    = regexp.MustCompile(`\.[A-Za-z0-9]{1,8}$`)
 )
 
-func pickAttr(m [][]byte) string {
-	if len(m) < 3 {
-		return ""
+// errNoSegmentCoords marks a failure to derive segment coordinates from a DASH
+// manifest — a limitation of this harness, not an upstream error. It is
+// surfaced verbatim in the report so a segment reference this harness cannot
+// evaluate is never mistaken for a genuine CDN 403/502.
+var errNoSegmentCoords = errors.New("could not derive segment coordinates")
+
+// decodeMPD decodes a DASH manifest, tolerating the encodings real MPDs
+// declare. encoding/xml refuses any declared encoding but UTF-8 unless a
+// CharsetReader is supplied, and MPDs in this library declare us-ascii.
+func decodeMPD(body []byte) (*mpdDoc, error) {
+	dec := xml.NewDecoder(bytes.NewReader(body))
+	dec.CharsetReader = dashCharsetReader
+	var doc mpdDoc
+	if err := dec.Decode(&doc); err != nil {
+		return nil, err
 	}
-	if len(m[1]) > 0 {
-		return string(m[1])
-	}
-	return string(m[2])
+	return &doc, nil
 }
 
-// substituteTemplate resolves the placeholders a harness can fill without
-// knowing the player's segment timeline. Anything else ($RepresentationID$
-// without a representation, $Bandwidth$, ...) makes the candidate unusable.
-func substituteTemplate(s, repID string) (string, bool) {
-	s = tmplNumberRe.ReplaceAllString(s, "1")
-	s = tmplTimeRe.ReplaceAllString(s, "0")
-	if repID != "" {
-		s = tmplRepIDRe.ReplaceAllString(s, repID)
+// dashCharsetReader supplies the missing CharsetReader. ASCII is a subset of
+// UTF-8 so those labels pass through untouched; single-byte Western code pages
+// are transcoded. Anything else is rejected rather than silently mis-decoded.
+func dashCharsetReader(label string, input io.Reader) (io.Reader, error) {
+	switch strings.ToLower(strings.TrimSpace(label)) {
+	case "us-ascii", "ascii", "utf-8", "utf8":
+		return input, nil
+	case "iso-8859-1", "latin1", "windows-1252", "cp1252":
+		raw, err := io.ReadAll(input)
+		if err != nil {
+			return nil, err
+		}
+		var sb strings.Builder
+		sb.Grow(len(raw))
+		for _, c := range raw {
+			if c < 0x80 {
+				sb.WriteByte(c)
+			} else {
+				sb.WriteRune(rune(c))
+			}
+		}
+		return strings.NewReader(sb.String()), nil
+	default:
+		return nil, fmt.Errorf("unsupported manifest encoding %q", label)
+	}
+}
+
+// Segment coordinates ($Number$, $Time$) must come from the SAME element that
+// carries the template being substituted. Borrowing a startNumber or a
+// SegmentTimeline time from another Representation/AdaptationSet yields a URL
+// for a segment that does not exist, and makes a healthy stream look broken.
+// Real XML decoding is the honest way to keep that scoping; regex-over-XML
+// could not. These types model only the subset the harness needs.
+
+type mpdDoc struct {
+	BaseURLs []string    `xml:"BaseURL"`
+	Periods  []mpdPeriod `xml:"Period"`
+}
+
+type mpdPeriod struct {
+	BaseURLs    []string            `xml:"BaseURL"`
+	Template    *mpdSegmentTemplate `xml:"SegmentTemplate"`
+	SegmentList *mpdSegmentList     `xml:"SegmentList"`
+	Adaptations []mpdAdaptationSet  `xml:"AdaptationSet"`
+}
+
+type mpdAdaptationSet struct {
+	BaseURLs    []string            `xml:"BaseURL"`
+	Template    *mpdSegmentTemplate `xml:"SegmentTemplate"`
+	SegmentList *mpdSegmentList     `xml:"SegmentList"`
+	Reps        []mpdRepresentation `xml:"Representation"`
+}
+
+type mpdRepresentation struct {
+	ID          string              `xml:"id,attr"`
+	BaseURLs    []string            `xml:"BaseURL"`
+	Template    *mpdSegmentTemplate `xml:"SegmentTemplate"`
+	SegmentList *mpdSegmentList     `xml:"SegmentList"`
+}
+
+type mpdSegmentTemplate struct {
+	Media          string              `xml:"media,attr"`
+	Initialization string              `xml:"initialization,attr"`
+	StartNumber    *int64              `xml:"startNumber,attr"`
+	Timeline       *mpdSegmentTimeline `xml:"SegmentTimeline"`
+}
+
+type mpdSegmentTimeline struct {
+	S []mpdSegment `xml:"S"`
+}
+
+type mpdSegment struct {
+	T *int64 `xml:"t,attr"`
+}
+
+type mpdSegmentList struct {
+	StartNumber    *int64             `xml:"startNumber,attr"`
+	Initialization *mpdInitialization `xml:"Initialization"`
+	SegmentURLs    []mpdSegmentURL    `xml:"SegmentURL"`
+}
+
+type mpdInitialization struct {
+	SourceURL string `xml:"sourceURL,attr"`
+}
+
+type mpdSegmentURL struct {
+	Media string `xml:"media,attr"`
+}
+
+// segmentCoords are the manifest-derived values a template is filled from.
+type segmentCoords struct {
+	startNumber int64
+	time        int64
+	repID       string
+}
+
+// startNumberAttr applies DASH's default of 1 only when the attribute is
+// genuinely absent.
+func startNumberAttr(v *int64) int64 {
+	if v == nil {
+		return 1
+	}
+	return *v
+}
+
+// firstTime applies DASH's default of 0 only when the first <S> has no t.
+func (tl *mpdSegmentTimeline) firstTime() int64 {
+	if tl == nil || len(tl.S) == 0 || tl.S[0].T == nil {
+		return 0
+	}
+	return *tl.S[0].T
+}
+
+func templateCoords(t *mpdSegmentTemplate, repID string) segmentCoords {
+	return segmentCoords{startNumber: startNumberAttr(t.StartNumber), time: t.Timeline.firstTime(), repID: repID}
+}
+
+func listCoords(l *mpdSegmentList, repID string) segmentCoords {
+	return segmentCoords{startNumber: startNumberAttr(l.StartNumber), repID: repID}
+}
+
+// coalesce returns the first non-nil pointer, so a Representation inherits the
+// nearest ancestor's SegmentTemplate/SegmentList exactly as a player resolves it.
+func coalesce[T any](vals ...*T) *T {
+	for _, v := range vals {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
+// segmentScope is one segment-bearing element with the coordinates scoped to it.
+type segmentScope struct {
+	list  *mpdSegmentList
+	tmpl  *mpdSegmentTemplate
+	repID string
+}
+
+// scopes returns every segment-bearing element in document order, each with its
+// inherited template/list and its own coordinates.
+func (d *mpdDoc) scopes() []segmentScope {
+	fallback := d.firstRepresentationID()
+	var out []segmentScope
+	for pi := range d.Periods {
+		p := &d.Periods[pi]
+		out = append(out, segmentScope{list: p.SegmentList, tmpl: p.Template, repID: fallback})
+		for ai := range p.Adaptations {
+			as := &p.Adaptations[ai]
+			out = append(out, segmentScope{
+				list:  coalesce(as.SegmentList, p.SegmentList),
+				tmpl:  coalesce(as.Template, p.Template),
+				repID: fallback,
+			})
+			for ri := range as.Reps {
+				rep := &as.Reps[ri]
+				repID := rep.ID
+				if repID == "" {
+					repID = fallback
+				}
+				out = append(out, segmentScope{
+					list:  coalesce(rep.SegmentList, as.SegmentList, p.SegmentList),
+					tmpl:  coalesce(rep.Template, as.Template, p.Template),
+					repID: repID,
+				})
+			}
+		}
+	}
+	return out
+}
+
+func (d *mpdDoc) baseURLsInOrder() []string {
+	var out []string
+	for _, b := range d.BaseURLs {
+		out = append(out, strings.TrimSpace(b))
+	}
+	for _, p := range d.Periods {
+		for _, b := range p.BaseURLs {
+			out = append(out, strings.TrimSpace(b))
+		}
+		for _, as := range p.Adaptations {
+			for _, b := range as.BaseURLs {
+				out = append(out, strings.TrimSpace(b))
+			}
+			for _, rep := range as.Reps {
+				for _, b := range rep.BaseURLs {
+					out = append(out, strings.TrimSpace(b))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (d *mpdDoc) firstRepresentationID() string {
+	for _, p := range d.Periods {
+		for _, as := range p.Adaptations {
+			for _, rep := range as.Reps {
+				if rep.ID != "" {
+					return rep.ID
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// substituteTemplate fills the placeholders this harness can resolve from the
+// manifest, honouring DASH's printf-style modifiers ($Number%05d$). Anything it
+// cannot fill ($Bandwidth$, a $RepresentationID$ with no representation, ...)
+// makes the candidate unusable — it never guesses a value that was not in the
+// manifest.
+func substituteTemplate(s string, c segmentCoords) (string, bool) {
+	var ok bool
+	if s, ok = replacePlaceholder(s, tmplNumberRe, c.startNumber); !ok {
+		return "", false
+	}
+	if s, ok = replacePlaceholder(s, tmplTimeRe, c.time); !ok {
+		return "", false
+	}
+	if c.repID != "" {
+		if s, ok = replacePlaceholder(s, tmplRepIDRe, c.repID); !ok {
+			return "", false
+		}
 	}
 	if tmplOtherRe.MatchString(s) {
 		return "", false
 	}
 	return s, true
+}
+
+// replacePlaceholder substitutes every match with val, applying the captured
+// printf verb when present. It reports false if the verb cannot render val
+// (e.g. %05d against a string) so the caller rejects the candidate instead of
+// emitting a mangled URL.
+func replacePlaceholder(s string, re *regexp.Regexp, val any) (string, bool) {
+	bad := false
+	out := re.ReplaceAllStringFunc(s, func(match string) string {
+		verb := ""
+		if m := re.FindStringSubmatch(match); len(m) > 1 {
+			verb = m[1]
+		}
+		if verb == "" {
+			return fmt.Sprint(val)
+		}
+		rendered := fmt.Sprintf(verb, val)
+		if strings.Contains(rendered, "%!") {
+			bad = true
+		}
+		return rendered
+	})
+	return out, !bad
 }
 
 // firstURI returns the first non-comment line of an HLS playlist (a variant or
@@ -253,53 +495,72 @@ func extXMapURI(body []byte) string {
 // segments, placeholders substituted), then Initialization / SegmentTemplate
 // initialization, and finally a file-like BaseURL. base (when non-empty) is a
 // directory-style BaseURL the reference must be resolved against first.
-func dashSegmentRef(body []byte) (ref, base string) {
-	repID := ""
-	if m := repIDAttrRe.FindSubmatch(body); m != nil {
-		repID = pickAttr(m)
+//
+// Placeholders are filled from the element the reference came from, so
+// coordinates never leak between Representations. When no reference can be
+// derived it returns errNoSegmentCoords so the report can tell a harness
+// limitation apart from a genuine upstream failure.
+func dashSegmentRef(body []byte) (string, string, error) {
+	doc, derr := decodeMPD(body)
+	if derr != nil {
+		return "", "", fmt.Errorf("%w: manifest is not decodable XML: %v", errNoSegmentCoords, derr)
 	}
+	scopes := doc.scopes()
+	bases := doc.baseURLsInOrder()
 	// Only a directory-style BaseURL acts as a resolution base. File-like
 	// BaseURLs are representation-level (e.g. a sidecar subtitle) and must not
 	// prefix other representations' segments.
-	if m := dashBaseURLRe.FindSubmatch(body); m != nil {
-		b := string(m[1])
+	var base string
+	for _, b := range bases {
 		if strings.HasSuffix(b, "/") && !strings.Contains(b, "$") {
 			base = b
+			break
 		}
 	}
-	// Prefer a real media segment over an initialization segment: the most
-	// common real failure is a manifest that loads while its media segments
+
+	// Pass 1 — prefer a real media segment over an initialization segment: the
+	// most common real failure is a manifest that loads while its media segments
 	// 403, so the media segment is the one worth fetching.
-	if m := segURLMediaRe.FindSubmatch(body); m != nil {
-		if s, ok := substituteTemplate(pickAttr(m), repID); ok && s != "" {
-			return s, base
+	for _, sc := range scopes {
+		if sc.list != nil {
+			c := listCoords(sc.list, sc.repID)
+			for _, su := range sc.list.SegmentURLs {
+				if s, ok := substituteTemplate(su.Media, c); ok && s != "" {
+					return s, base, nil
+				}
+			}
 		}
-	}
-	if m := tmplMediaRe.FindSubmatch(body); m != nil {
-		if s, ok := substituteTemplate(pickAttr(m), repID); ok && s != "" {
-			return s, base
-		}
-	}
-	if m := initSourceRe.FindSubmatch(body); m != nil {
-		if s, ok := substituteTemplate(pickAttr(m), repID); ok && s != "" {
-			return s, base
-		}
-	}
-	if m := tmplInitRe.FindSubmatch(body); m != nil {
-		if s, ok := substituteTemplate(pickAttr(m), repID); ok && s != "" {
-			return s, base
-		}
-	}
-	// Last resort: a file-like BaseURL fetched on its own.
-	if m := dashBaseURLRe.FindSubmatch(body); m != nil {
-		b := string(m[1])
-		if !strings.HasSuffix(b, "/") && !strings.Contains(b, "$") {
-			if last := b[strings.LastIndex(b, "/")+1:]; fileExtRe.MatchString(last) {
-				return b, ""
+		if sc.tmpl != nil {
+			if s, ok := substituteTemplate(sc.tmpl.Media, templateCoords(sc.tmpl, sc.repID)); ok && s != "" {
+				return s, base, nil
 			}
 		}
 	}
-	return "", ""
+
+	// Pass 2 — initialization references.
+	for _, sc := range scopes {
+		if sc.list != nil && sc.list.Initialization != nil {
+			if s, ok := substituteTemplate(sc.list.Initialization.SourceURL, listCoords(sc.list, sc.repID)); ok && s != "" {
+				return s, base, nil
+			}
+		}
+		if sc.tmpl != nil {
+			if s, ok := substituteTemplate(sc.tmpl.Initialization, templateCoords(sc.tmpl, sc.repID)); ok && s != "" {
+				return s, base, nil
+			}
+		}
+	}
+
+	// Last resort: a file-like BaseURL fetched on its own.
+	for _, b := range bases {
+		if strings.HasSuffix(b, "/") || strings.Contains(b, "$") {
+			continue
+		}
+		if last := b[strings.LastIndex(b, "/")+1:]; fileExtRe.MatchString(last) {
+			return b, "", nil
+		}
+	}
+	return "", "", fmt.Errorf("%w: no usable SegmentURL/SegmentTemplate media, Initialization or file BaseURL", errNoSegmentCoords)
 }
 
 // --- content validation -----------------------------------------------------
@@ -577,9 +838,9 @@ func fetchOneSegment(ctx context.Context, client *http.Client, base, kind, manif
 	}
 
 	if kind == "dash" {
-		ref, refBase := dashSegmentRef(manifestBody)
-		if ref == "" {
-			return "", 0, "", errors.New("no fetchable segment reference found in DASH manifest (no SegmentURL/Initialization/SegmentTemplate media/BaseURL)")
+		ref, refBase, derr := dashSegmentRef(manifestBody)
+		if derr != nil {
+			return "", 0, "", derr
 		}
 		resBase := upstream
 		if refBase != "" {
@@ -595,7 +856,7 @@ func fetchOneSegment(ctx context.Context, client *http.Client, base, kind, manif
 		}
 		abs := resBase.ResolveReference(ru)
 		if strings.Contains(abs.String(), "$") {
-			return "", 0, "", fmt.Errorf("unresolved template placeholders in segment url %q", abs.String())
+			return "", 0, "", fmt.Errorf("%w: unresolved template placeholders in segment url %q", errNoSegmentCoords, abs.String())
 		}
 		return fetchAndCheckSegment(ctx, client, origin, params, abs)
 	}
