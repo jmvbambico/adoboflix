@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -67,6 +68,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 	}
 
 	episodeCounts := map[string]int{}
+	countsAvailable := false
 	if len(seriesIDs) > 0 {
 		type countRow struct {
 			VodID string `db:"vod_id"`
@@ -74,7 +76,12 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 		}
 		var rows []countRow
 		query := `SELECT vod_id, COUNT(*) AS episode_count FROM episodes WHERE vod_id = ANY($1) GROUP BY vod_id`
-		if err := h.db.Select(&rows, query, pq.Array(seriesIDs)); err == nil {
+		if err := h.db.Select(&rows, query, pq.Array(seriesIDs)); err != nil {
+			// Do not report a misleading 0 for every Series: leave the field
+			// absent, exactly as when the count lookup was unavailable.
+			log.Printf("entries: episode count query failed for %d series: %v", len(seriesIDs), err)
+		} else {
+			countsAvailable = true
 			for _, r := range rows {
 				episodeCounts[r.VodID] = r.Count
 			}
@@ -83,7 +90,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 
 	for i, e := range entries {
 		enriched[i].Entry = e
-		if e.Type == "Series" {
+		if e.Type == "Series" && countsAvailable {
 			count := episodeCounts[e.ID]
 			enriched[i].EpisodeCount = &count
 		}
@@ -200,7 +207,16 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 
 	// Prefer the authoritative vod_streams rows; fall back silently to the
 	// denormalized vod_assets.stream_url cache when the asset has none.
+	//
+	// Zero rows and a query error mean different things: zero rows is an
+	// expected state (the asset genuinely has no vod_streams row), while an
+	// error is a fault. Both still fall back so playback keeps working, but a
+	// fault must be visible in the logs rather than silently serving the
+	// stale stream_url cache.
 	vodStreams, streamErr := h.db.GetVodStreams(entry.ID)
+	if streamErr != nil {
+		log.Printf("resolve: GetVodStreams(%s) failed, falling back to cached stream_url: %v", entry.ID, streamErr)
+	}
 	if streamErr == nil && len(vodStreams) > 0 {
 		primary := vodStreams[0]
 
