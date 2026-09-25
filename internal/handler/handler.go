@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
+	"github.com/lib/pq"
 )
 
 type PlayerHandler struct {
@@ -55,14 +56,36 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 		EpisodeCount *int `json:"episode_count,omitempty"`
 	}
 	enriched := make([]enrichedEntry, len(entries))
+
+	// Collect the Series IDs on this page and resolve every episode count in a
+	// single aggregate query instead of one GetEpisodes call per entry.
+	seriesIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "Series" {
+			seriesIDs = append(seriesIDs, e.ID)
+		}
+	}
+
+	episodeCounts := map[string]int{}
+	if len(seriesIDs) > 0 {
+		type countRow struct {
+			VodID string `db:"vod_id"`
+			Count int    `db:"episode_count"`
+		}
+		var rows []countRow
+		query := `SELECT vod_id, COUNT(*) AS episode_count FROM episodes WHERE vod_id = ANY($1) GROUP BY vod_id`
+		if err := h.db.Select(&rows, query, pq.Array(seriesIDs)); err == nil {
+			for _, r := range rows {
+				episodeCounts[r.VodID] = r.Count
+			}
+		}
+	}
+
 	for i, e := range entries {
 		enriched[i].Entry = e
 		if e.Type == "Series" {
-			episodes, _, err := h.db.GetEpisodes(e.ID)
-			if err == nil {
-				count := len(episodes)
-				enriched[i].EpisodeCount = &count
-			}
+			count := episodeCounts[e.ID]
+			enriched[i].EpisodeCount = &count
 		}
 	}
 
