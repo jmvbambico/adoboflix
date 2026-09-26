@@ -30,12 +30,17 @@ type Service struct {
 }
 
 // NewService creates an EPG service and does an initial load. An empty or
-// missing EPG is non-fatal: a fresh install with an empty compiled_epg table
-// still boots, and the service simply serves no programmes until data arrives.
+// missing EPG is non-fatal: a fresh install with no EPG data still boots, and
+// the service simply serves no programmes until data arrives.
+//
+// The log reports the underlying error and nothing more. It deliberately does
+// not name a table: internal/epg is source-agnostic, and the byte source may be
+// an HTTP adapter with no table behind it at all, so asserting a cause here
+// would be a guess dressed as a diagnosis.
 func NewService(provider source.CompiledEPGProvider) *Service {
 	s := &Service{provider: provider}
 	if err := s.Refresh(); err != nil {
-		log.Printf("[EPG] No EPG data available yet: %v (compiled_epg table may be empty)", err)
+		log.Printf("[EPG] No EPG data available yet: %v", err)
 	}
 	return s
 }
