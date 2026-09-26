@@ -524,6 +524,14 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
+	// EPG is an optional source capability. A source that cannot supply a
+	// compiled XMLTV blob leaves h.epg unset; report that plainly, naming the
+	// active source, instead of dereferencing a nil service.
+	if h.epg == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": source.UnsupportedEPGError(h.src.Name()).Error()})
+		return
+	}
+
 	id := c.Param("id")
 	channel, err := h.src.GetChannel(id)
 	if err != nil {
