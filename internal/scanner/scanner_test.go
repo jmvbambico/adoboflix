@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -316,5 +317,243 @@ func TestReportFilenamesAndCSV(t *testing.T) {
 	}
 	if !strings.Contains(out, "dead,404") {
 		t.Errorf("missing result/status: %q", out)
+	}
+}
+
+// freeTextColumns names the CSV columns that can carry library-derived or
+// error-derived text, so every one of them must be formula-sanitised.
+var freeTextColumns = []string{
+	"channel_name", "category", "label", "channel_id",
+	"stream_id", "host", "manifest", "reason",
+}
+
+// formulaReport is a report whose free-text cells all carry the given value.
+func formulaReport(v string) *Report {
+	return &Report{
+		StartedAt:  time.Now().UTC(),
+		FinishedAt: time.Now().UTC(),
+		Streams: []ProbeResult{{
+			ChannelName: v,
+			Category:    v,
+			Label:       v,
+			ChannelID:   v,
+			StreamID:    v,
+			Host:        v,
+			Manifest:    v,
+			Reason:      v,
+			ProbedAt:    time.Now().UTC(),
+		}},
+	}
+}
+
+// parseCSV re-reads a rendered report so assertions see the cell values a
+// spreadsheet would, not the raw quoted text.
+func parseCSV(t *testing.T, out string) (header []string, row []string) {
+	t.Helper()
+	rows, err := csv.NewReader(strings.NewReader(out)).ReadAll()
+	if err != nil {
+		t.Fatalf("re-read csv: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("got %d csv rows, want header + 1 data row", len(rows))
+	}
+	return rows[0], rows[1]
+}
+
+func columnIndex(header []string) map[string]int {
+	idx := make(map[string]int, len(header))
+	for i, h := range header {
+		idx[h] = i
+	}
+	return idx
+}
+
+func TestWriteCSVSanitisesFormulaCells(t *testing.T) {
+	cases := []struct{ name, value string }{
+		{"equals", "=cmd|'/c calc'!A0"},
+		{"plus", "+1+1"},
+		{"minus", "-2+3"},
+		{"at", "@SUM(A1:A9)"},
+		{"tab", "\t=hidden"},
+		{"carriage return", "\r=hidden"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var sb strings.Builder
+			if err := WriteCSV(&sb, formulaReport(tc.value)); err != nil {
+				t.Fatalf("WriteCSV: %v", err)
+			}
+			header, row := parseCSV(t, sb.String())
+			idx := columnIndex(header)
+			for _, col := range freeTextColumns {
+				if got, want := row[idx[col]], "'"+tc.value; got != want {
+					t.Errorf("%s cell = %q, want %q", col, got, want)
+				}
+			}
+			// result/http_status/probed_at are formatted by our own code and
+			// must not be mistaken for formulas and mangled.
+			if got := row[idx["http_status"]]; got != "0" {
+				t.Errorf("http_status = %q, want unmodified 0", got)
+			}
+			if got := row[idx["result"]]; got != "dead" {
+				t.Errorf("result = %q, want unmodified dead", got)
+			}
+		})
+	}
+}
+
+func TestWriteCSVLeavesNormalCellsUntouched(t *testing.T) {
+	r := formulaReport("News HD")
+	r.Streams[0].HTTPStatus = 403
+	r.Streams[0].Reason = "HTTP 403 Forbidden"
+
+	var sb strings.Builder
+	if err := WriteCSV(&sb, r); err != nil {
+		t.Fatalf("WriteCSV: %v", err)
+	}
+	header, row := parseCSV(t, sb.String())
+	idx := columnIndex(header)
+
+	for _, col := range []string{"channel_name", "category", "label", "channel_id", "stream_id", "host", "manifest"} {
+		if got := row[idx[col]]; got != "News HD" {
+			t.Errorf("%s = %q, want %q untouched", col, got, "News HD")
+		}
+	}
+	if got := row[idx["reason"]]; got != "HTTP 403 Forbidden" {
+		t.Errorf("reason = %q, want it untouched", got)
+	}
+}
+
+// TestFormulaSanitisationLeavesJSONVerbatim proves the defence is confined to
+// the CSV writer: the JSON report is a programmatic format and must round-trip
+// the original value with no injected apostrophe.
+func TestFormulaSanitisationLeavesJSONVerbatim(t *testing.T) {
+	const payload = `=HYPERLINK("http://evil.example")`
+	r := formulaReport(payload)
+
+	data, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if strings.Contains(string(data), "'"+payload) {
+		t.Errorf("JSON report received an injected apostrophe: %s", data)
+	}
+
+	var decoded Report
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	got := decoded.Streams[0]
+	for _, v := range []string{got.ChannelName, got.Category, got.Label, got.ChannelID, got.StreamID, got.Host, got.Manifest, got.Reason} {
+		if v != payload {
+			t.Errorf("JSON round-trip changed a value: got %q, want %q", v, payload)
+		}
+	}
+
+	// CSV, by contrast, is sanitised — the apostrophe is spreadsheet-only.
+	var sb strings.Builder
+	if err := WriteCSV(&sb, r); err != nil {
+		t.Fatalf("WriteCSV: %v", err)
+	}
+	_, row := parseCSV(t, sb.String())
+	if row[0] != "'"+payload {
+		t.Errorf("CSV channel_name = %q, want %q", row[0], "'"+payload)
+	}
+}
+
+// staticLister returns a fixed target set without touching a database.
+type staticLister struct{ targets []source.ProbeTarget }
+
+func (s staticLister) ListStreamsForProbe() ([]source.ProbeTarget, error) { return s.targets, nil }
+
+// panicLister panics during enumeration to exercise run()'s recover path.
+type panicLister struct{}
+
+func (panicLister) ListStreamsForProbe() ([]source.ProbeTarget, error) {
+	panic("lister exploded")
+}
+
+// waitForTerminal blocks until the manager leaves the running state.
+func waitForTerminal(t *testing.T, m *Manager) Status {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := m.Status(); st.State != StateRunning {
+			return st
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("scan never left the running state")
+	return Status{}
+}
+
+// TestManagerCancelEndsCancelledWithoutPublishingPartialReport covers the
+// shutdown path: Cancel ends the scan in StateCancelled and leaves the
+// truncated run unpublished, so Report() can never hand back a partial scan as
+// if it were complete.
+func TestManagerCancelEndsCancelledWithoutPublishingPartialReport(t *testing.T) {
+	// A server that never answers on its own: the probe only ends once the
+	// scan context is cancelled, which is exactly what Cancel does.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	targets := make([]source.ProbeTarget, 500)
+	for i := range targets {
+		targets[i] = source.ProbeTarget{URL: srv.URL, ChannelID: "ch-1", ChannelName: "News HD"}
+	}
+
+	m := NewManager(staticLister{targets: targets})
+	if _, started := m.Start(); !started {
+		t.Fatal("expected the scan to start")
+	}
+	m.Cancel()
+
+	st := waitForTerminal(t, m)
+	if st.State != StateCancelled {
+		t.Fatalf("state = %q, want %q", st.State, StateCancelled)
+	}
+	if st.HasReport {
+		t.Error("a cancelled scan published its partial report")
+	}
+	if _, err := m.Report(); !errors.Is(err, ErrNoReport) {
+		t.Errorf("Report() error = %v, want ErrNoReport", err)
+	}
+}
+
+// TestManagerCancelWithoutStartIsNoop covers the never-started case: a scan
+// that never began must be cancellable without a panic and stay idle.
+func TestManagerCancelWithoutStartIsNoop(t *testing.T) {
+	m := NewManager(staticLister{})
+	m.Cancel()
+	if st := m.Status(); st.State != StateIdle {
+		t.Errorf("state = %q, want %q", st.State, StateIdle)
+	}
+}
+
+// TestManagerRecoverLeavesTerminalErrorAndRestartable proves a panic during a
+// run cannot wedge the state machine in StateRunning: it lands in the terminal
+// StateError, and the single-scan lock is released so a later Start succeeds.
+func TestManagerRecoverLeavesTerminalErrorAndRestartable(t *testing.T) {
+	m := NewManager(panicLister{})
+	if _, started := m.Start(); !started {
+		t.Fatal("expected the scan to start")
+	}
+
+	st := waitForTerminal(t, m)
+	if st.State != StateError {
+		t.Fatalf("state = %q, want terminal %q (panic must not wedge running)", st.State, StateError)
+	}
+	if !strings.Contains(st.Error, "panicked") {
+		t.Errorf("error = %q, want it to record the panic", st.Error)
+	}
+
+	if _, started := m.Start(); !started {
+		t.Fatal("manager wedged after a panic: a later scan could not start")
+	}
+	// Let the second (also panicking) run finish so it does not outlive the test.
+	if st := waitForTerminal(t, m); st.State != StateError {
+		t.Fatalf("restart state = %q, want %q", st.State, StateError)
 	}
 }
