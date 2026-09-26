@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -8,10 +11,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
+	"github.com/jmvbambico/adoboflix/internal/scanner"
 	"github.com/lib/pq"
 )
 
@@ -542,6 +547,79 @@ func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// Scan state is held in a package-level manager so the scan handlers stay
+// self-contained (they are the only handler code this feature owns).
+var (
+	scanMgrOnce sync.Once
+	scanMgr     *scanner.Manager
+)
+
+func scanManager(database *db.DB) *scanner.Manager {
+	scanMgrOnce.Do(func() {
+		scanMgr = scanner.NewManager(database.DB)
+	})
+	return scanMgr
+}
+
+// ScanChannels starts a background scan and returns immediately. A second
+// POST while one is running does not start a second scan; it returns the
+// in-progress status instead. Nothing is persisted upstream — the scan only
+// probes streams and aggregates an in-memory report.
 func (h *PlayerHandler) ScanChannels(c *gin.Context) {
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "scan not implemented"})
+	status, started := scanManager(h.db).Start()
+	if !started {
+		c.JSON(http.StatusConflict, gin.H{
+			"status":  status,
+			"message": "a scan is already in progress",
+		})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"status":  status,
+		"message": "scan started",
+	})
+}
+
+// ScanStatus reports scan progress/completion for polling.
+func (h *PlayerHandler) ScanStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"status": scanManager(h.db).Status()})
+}
+
+// ScanReport serves the completed report as a downloadable file (JSON, or CSV
+// with ?format=csv) so the user can hand it to the operator out of band.
+func (h *PlayerHandler) ScanReport(c *gin.Context) {
+	report, err := scanManager(h.db).Report()
+	switch {
+	case errors.Is(err, scanner.ErrScanInProgress):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, scanner.ErrNoReport):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		log.Printf("scan report: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load report"})
+		return
+	}
+
+	if c.DefaultQuery("format", "json") == "csv" {
+		var buf bytes.Buffer
+		if err := scanner.WriteCSV(&buf, report); err != nil {
+			log.Printf("scan report: render csv: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to render report"})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", report.Filename(".csv")))
+		c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+		return
+	}
+
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		log.Printf("scan report: marshal json: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to render report"})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", report.Filename(".json")))
+	c.Data(http.StatusOK, "application/json", data)
 }

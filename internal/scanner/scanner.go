@@ -1,9 +1,18 @@
+// Package scanner probes stream health for its OWN user and produces an
+// in-memory, downloadable report. It is strictly read-only against the
+// AdoboTV database: SELECTs only. Probe results are never persisted upstream
+// (no check_status, no last_check, no playlist writes) — the user hands the
+// report to the operator out of band.
 package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -12,79 +21,72 @@ import (
 )
 
 const (
-	LocalDefaultPlaylistName = "Local Default"
-	LocalDefaultPlaylistDesc = "Auto-generated local playlist. Channels verified playable via HTTP health check."
-	ScanConcurrency          = 20 // parallel goroutines probing streams
-	ScanTimeout              = 10 * time.Second
+	// ScanConcurrency bounds the number of parallel probe goroutines.
+	ScanConcurrency = 20
+	// ScanTimeout is the explicit timeout applied to every single probe.
+	ScanTimeout = 10 * time.Second
+	// scanBudget caps one full scan run.
+	scanBudget = 5 * time.Minute
+	// probeBodyBytes is how much of each response body is inspected.
+	probeBodyBytes = 4096
+
+	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
 // StreamToCheck holds the data needed to test a stream.
 type StreamToCheck struct {
-	ChannelID   string `db:"channel_id"`
-	StreamID    string `db:"id"`
-	URL         string `db:"url"`
-	SourceType  string `db:"source_type"`
-	ChannelName string `db:"name"`
-	Category    string `db:"category"`
+	ChannelID   string  `db:"channel_id"`
+	StreamID    string  `db:"id"`
+	Label       string  `db:"label"`
+	URL         string  `db:"url"`
+	SourceType  string  `db:"source_type"`
+	ChannelName string  `db:"name"`
+	Category    string  `db:"category"`
+	UserAgent   *string `db:"user_agent"`
+	Referer     *string `db:"referer"`
 }
 
-// ScanResult summarizes the health check.
-type ScanResult struct {
-	TotalChannels int    `json:"total_channels"`
-	AliveChannels int    `json:"alive_channels"`
-	DeadChannels  int    `json:"dead_channels"`
-	TotalStreams  int    `json:"total_streams"`
-	AliveStreams  int    `json:"alive_streams"`
-	DeadStreams   int    `json:"dead_streams"`
-	PlaylistID   string `json:"playlist_id"`
-	PlaylistName string `json:"playlist_name"`
+// ProbeResult is one row of the report: everything a human needs to act on
+// a dead stream without touching the database.
+type ProbeResult struct {
+	ChannelID   string    `json:"channel_id"`
+	ChannelName string    `json:"channel_name"`
+	Category    string    `json:"category"`
+	StreamID    string    `json:"stream_id"`
+	Label       string    `json:"label"`
+	URL         string    `json:"url"`
+	Alive       bool      `json:"alive"`
+	HTTPStatus  int       `json:"http_status,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	ProbedAt    time.Time `json:"probed_at"`
 }
 
-// GetPlaylistID returns the ID of the Local Default playlist.
-// Accepts *sqlx.DB directly so the handler can use it without importing db package.
-func GetPlaylistID(database *sqlx.DB) (string, error) {
-	var id string
-	err := database.QueryRow(
-		`SELECT id FROM playlists WHERE name = $1`, LocalDefaultPlaylistName,
-	).Scan(&id)
-	if err != nil {
-		return "", fmt.Errorf("local playlist not found: %w", err)
-	}
-	return id, nil
+// Report is the aggregate of one scan run. It lives in memory only.
+type Report struct {
+	StartedAt     time.Time     `json:"started_at"`
+	FinishedAt    time.Time     `json:"finished_at"`
+	TotalChannels int           `json:"total_channels"`
+	AliveChannels int           `json:"alive_channels"`
+	DeadChannels  int           `json:"dead_channels"`
+	TotalStreams  int           `json:"total_streams"`
+	AliveStreams  int           `json:"alive_streams"`
+	DeadStreams   int           `json:"dead_streams"`
+	Streams       []ProbeResult `json:"streams"`
 }
 
-// EnsureLocalPlaylist creates the "Local Default" playlist if it doesn't exist.
-func EnsureLocalPlaylist(database *sqlx.DB) (string, error) {
-	// Check if it already exists
-	var id string
-	err := database.QueryRow(
-		`SELECT id FROM playlists WHERE name = $1`, LocalDefaultPlaylistName,
-	).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-
-	// Create the playlist
-	err = database.QueryRow(
-		`INSERT INTO playlists (id, name, description, is_default, is_public, status, is_active)
-		 VALUES (gen_random_uuid(), $1, $2, true, true, 'active', true)
-		 RETURNING id`,
-		LocalDefaultPlaylistName, LocalDefaultPlaylistDesc,
-	).Scan(&id)
-	if err != nil {
-		return "", fmt.Errorf("create local playlist: %w", err)
-	}
-	fmt.Printf("📡 Created playlist: %s (%s)\n", LocalDefaultPlaylistName, id)
-	return id, nil
-}
+// streamColumns lists the columns we explicitly select. Selecting "*" breaks
+// against the AdoboTV schema because it carries columns this struct does not
+// map, and sqlx errors on unmapped destinations.
+const streamColumns = `s.channel_id, s.id, COALESCE(s.label, '') AS label, s.url,
+	s.source_type, s.user_agent, s.referer,
+	c.name, COALESCE(c.category, 'Unknown') AS category`
 
 // FetchAllStreams returns all streams with their channel metadata for probing.
+// Read-only: a SELECT against streams joined with channels.
 func FetchAllStreams(database *sqlx.DB) ([]StreamToCheck, error) {
 	var streams []StreamToCheck
 	query := `
-		SELECT 
-			s.channel_id, s.id, s.url, s.source_type,
-			c.name, COALESCE(c.category, 'Unknown') as category
+		SELECT ` + streamColumns + `
 		FROM streams s
 		JOIN channels c ON c.id = s.channel_id
 		WHERE s.url IS NOT NULL AND s.url != ''
@@ -96,14 +98,45 @@ func FetchAllStreams(database *sqlx.DB) ([]StreamToCheck, error) {
 	return streams, nil
 }
 
-// ProbeStream tests if a stream URL is accessible via HTTP.
-func ProbeStream(ctx context.Context, streamURL string) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", streamURL, nil)
-	if err != nil {
-		return false
+// classifyProbeError turns a transport failure into a human-readable reason
+// that says WHAT kind of failure it was (timeout vs connection/TLS vs other),
+// so a report never lumps a broken CDN handshake behind a generic message.
+func classifyProbeError(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "cancelled: " + err.Error()
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return "timeout: " + err.Error()
+		}
+		// Dial, DNS, certificate and TLS handshake failures all surface
+		// through *url.Error here — name them as connection errors.
+		return "connection error: " + err.Error()
+	}
+	return "request failed: " + err.Error()
+}
+
+// ProbeStream tests whether a stream URL is alive. It classifies the stream
+// by CONTENT (#EXTM3U, <MPD, …) rather than trusting the status code alone.
+// When the stream row carries its own user_agent/referer, those are used —
+// several CDNs reject probes that arrive with the wrong headers.
+func ProbeStream(ctx context.Context, stream StreamToCheck) (alive bool, httpStatus int, reason string) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, stream.URL, nil)
+	if err != nil {
+		return false, 0, "invalid URL: " + err.Error()
+	}
+
+	ua := defaultUserAgent
+	if stream.UserAgent != nil && *stream.UserAgent != "" {
+		ua = *stream.UserAgent
+	}
+	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "*/*")
+	if stream.Referer != nil && *stream.Referer != "" {
+		req.Header.Set("Referer", *stream.Referer)
+	}
 
 	client := &http.Client{
 		Timeout: ScanTimeout,
@@ -117,12 +150,12 @@ func ProbeStream(ctx context.Context, streamURL string) bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return false
+		return false, 0, classifyProbeError(err)
 	}
 	defer resp.Body.Close()
 
 	// Read first 4KB to verify content is real
-	buf := make([]byte, 4096)
+	buf := make([]byte, probeBodyBytes)
 	n, _ := resp.Body.Read(buf)
 
 	statusOk := resp.StatusCode >= 200 && resp.StatusCode < 400
@@ -145,191 +178,124 @@ func ProbeStream(ctx context.Context, streamURL string) bool {
 			// Has significant content — might be a binary stream
 			isValidStream = statusOk
 		}
-		return statusOk && isValidStream
-	}
-
-	return statusOk
-}
-
-// StreamStatus represents the health status of a stream.
-type StreamStatus struct {
-	StreamID string
-	Status   string // "online" or "offline"
-}
-
-// UpdateStreamStatuses updates the check_status on streams.
-func UpdateStreamStatuses(database *sqlx.DB, statuses []StreamStatus) error {
-	tx, err := database.Beginx()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareNamed(
-		`UPDATE streams SET check_status = :status, last_check = NOW() WHERE id = :streamid`,
-	)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, s := range statuses {
-		if _, err := stmt.Exec(s); err != nil {
-			return fmt.Errorf("update stream %s: %w", s.StreamID, err)
+		if statusOk && isValidStream {
+			return true, resp.StatusCode, ""
 		}
-	}
-
-	return tx.Commit()
-}
-
-// RebuildPlaylist clears and repopulates the playlist with only alive channel IDs.
-func RebuildPlaylist(database *sqlx.DB, playlistID string, aliveChannels map[string]string) error {
-	tx, err := database.Beginx()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Clear existing entries
-	if _, err := tx.Exec(`DELETE FROM playlist_channels WHERE playlist_id = $1`, playlistID); err != nil {
-		return fmt.Errorf("clear playlist: %w", err)
-	}
-
-	// Insert alive channels in order
-	stmt, err := tx.Prepare(
-		`INSERT INTO playlist_channels (playlist_id, channel_id, category, display_order) VALUES ($1, $2, $3, $4)`,
-	)
-	if err != nil {
-		return fmt.Errorf("prepare insert: %w", err)
-	}
-	defer stmt.Close()
-
-	order := 0
-	for chID, category := range aliveChannels {
-		order++
-		if _, err := stmt.Exec(playlistID, chID, category, order); err != nil {
-			return fmt.Errorf("insert channel %s: %w", chID, err)
+		if !statusOk {
+			return false, resp.StatusCode, fmt.Sprintf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 		}
+		return false, resp.StatusCode, fmt.Sprintf("HTTP %d: response does not look like a stream manifest", resp.StatusCode)
 	}
 
-	return tx.Commit()
+	if !statusOk {
+		return false, resp.StatusCode, fmt.Sprintf("HTTP %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	return true, resp.StatusCode, ""
 }
 
-// RunScan performs the full health check: probe every stream, update statuses, rebuild playlist.
-func RunScan(database *sqlx.DB) (*ScanResult, error) {
-	fmt.Println("📡 Starting channel health check scan...")
+// ProgressFunc receives probe progress: streams probed, total, alive so far.
+type ProgressFunc func(probed, total, alive int)
 
-	// Ensure local playlist exists
-	playlistID, err := EnsureLocalPlaylist(database)
-	if err != nil {
-		return nil, err
-	}
-
-	// Fetch all streams
+// RunScan probes every stream, aggregates the results in memory and returns a
+// report. It persists NOTHING upstream — no check_status, no last_check, no
+// playlist writes. Errors wrap with %w; context cancellation aborts the run.
+func RunScan(ctx context.Context, database *sqlx.DB, progress ProgressFunc) (*Report, error) {
 	streams, err := FetchAllStreams(database)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("📡 Found %d streams to probe\n", len(streams))
 
-	// Concurrently probe streams
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, scanBudget)
 	defer cancel()
 
-	type probeResult struct {
-		StreamID  string
-		ChannelID string
-		Category  string
-		Alive     bool
+	report := &Report{
+		StartedAt:  time.Now().UTC(),
+		TotalStreams: len(streams),
+	}
+	if progress != nil {
+		progress(0, len(streams), 0)
 	}
 
 	jobs := make(chan StreamToCheck, len(streams))
-	results := make(chan probeResult, len(streams))
+	results := make(chan ProbeResult, len(streams))
 
-	// Launch workers
+	// Bounded worker pool.
 	var wg sync.WaitGroup
 	for i := 0; i < ScanConcurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for stream := range jobs {
-				alive := ProbeStream(ctx, stream.URL)
-				results <- probeResult{
-					StreamID:  stream.StreamID,
-					ChannelID: stream.ChannelID,
-					Category:  stream.Category,
-					Alive:     alive,
+				result := ProbeResult{
+					ChannelID:   stream.ChannelID,
+					ChannelName: stream.ChannelName,
+					Category:    stream.Category,
+					StreamID:    stream.StreamID,
+					Label:       stream.Label,
+					URL:         stream.URL,
+					ProbedAt:    time.Now().UTC(),
 				}
+				if ctx.Err() != nil {
+					result.Reason = "not probed: " + ctx.Err().Error()
+					results <- result
+					continue
+				}
+				result.Alive, result.HTTPStatus, result.Reason = ProbeStream(ctx, stream)
+				results <- result
 			}
 		}()
 	}
 
-	// Send all streams to workers
+	// The channel is buffered for the full stream count, so enqueueing never
+	// blocks; workers honor ctx per stream instead.
 	for _, s := range streams {
 		jobs <- s
 	}
 	close(jobs)
 
-	// Wait and close results
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
-	// Collect results
-	streamStatuses := []StreamStatus{}
-	aliveChannels := map[string]string{} // channelID -> category
-	totalStreams := 0
+	allChannels := map[string]struct{}{}
+	aliveChannels := map[string]struct{}{}
+	probed := 0
 	aliveStreams := 0
 
 	for r := range results {
-		totalStreams++
-		status := "offline"
+		probed++
+		allChannels[r.ChannelID] = struct{}{}
 		if r.Alive {
-			status = "online"
 			aliveStreams++
-			aliveChannels[r.ChannelID] = r.Category
+			aliveChannels[r.ChannelID] = struct{}{}
 		}
-		streamStatuses = append(streamStatuses, StreamStatus{
-			StreamID: r.StreamID,
-			Status:   status,
-		})
+		report.Streams = append(report.Streams, r)
+		if progress != nil {
+			progress(probed, len(streams), aliveStreams)
+		}
 	}
 
-	// Update stream statuses in DB
-	fmt.Printf("📡 Updating stream statuses (%d online, %d offline)\n", aliveStreams, totalStreams-aliveStreams)
-	if err := UpdateStreamStatuses(database, streamStatuses); err != nil {
-		return nil, fmt.Errorf("update statuses: %w", err)
+	report.FinishedAt = time.Now().UTC()
+	report.TotalChannels = len(allChannels)
+	report.AliveChannels = len(aliveChannels)
+	report.DeadChannels = len(allChannels) - len(aliveChannels)
+	report.AliveStreams = aliveStreams
+	report.DeadStreams = len(streams) - aliveStreams
+
+	// Stable, human-friendly order: channel name, then label, then stream id.
+	sort.Slice(report.Streams, func(i, j int) bool {
+		if report.Streams[i].ChannelName != report.Streams[j].ChannelName {
+			return report.Streams[i].ChannelName < report.Streams[j].ChannelName
+		}
+		if report.Streams[i].Label != report.Streams[j].Label {
+			return report.Streams[i].Label < report.Streams[j].Label
+		}
+		return report.Streams[i].StreamID < report.Streams[j].StreamID
+	})
+
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("scan stopped after %d/%d probes: %w", probed, len(streams), err)
 	}
-
-	// Rebuild playlist with only alive channels
-	fmt.Printf("📡 Rebuilding playlist with %d alive channels\n", len(aliveChannels))
-	if err := RebuildPlaylist(database, playlistID, aliveChannels); err != nil {
-		return nil, fmt.Errorf("rebuild playlist: %w", err)
-	}
-
-	// Count unique channels
-	allChannels := map[string]bool{}
-	for _, s := range streams {
-		allChannels[s.ChannelID] = true
-	}
-
-	result := &ScanResult{
-		TotalChannels: len(allChannels),
-		AliveChannels: len(aliveChannels),
-		DeadChannels:  len(allChannels) - len(aliveChannels),
-		TotalStreams:  totalStreams,
-		AliveStreams:  aliveStreams,
-		DeadStreams:   totalStreams - aliveStreams,
-		PlaylistID:   playlistID,
-		PlaylistName: LocalDefaultPlaylistName,
-	}
-
-	fmt.Printf("✅ Scan complete: %d/%d channels alive, %d/%d streams alive\n",
-		result.AliveChannels, result.TotalChannels,
-		result.AliveStreams, result.TotalStreams,
-	)
-	fmt.Printf("📡 Playlist '%s' rebuilt with %d channels\n", result.PlaylistName, result.AliveChannels)
-
-	return result, nil
+	return report, nil
 }

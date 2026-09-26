@@ -80,6 +80,8 @@ func main() {
 		api.GET("/channels/:id/resolve", playerHandler.ResolveChannelStream)
 		api.GET("/channels/:id/epg", playerHandler.GetChannelEPG)
 		api.POST("/channels/scan", playerHandler.ScanChannels)
+		api.GET("/channels/scan/status", playerHandler.ScanStatus)
+		api.GET("/channels/scan/report", playerHandler.ScanReport)
 	}
 
 	// Serve built client assets.
