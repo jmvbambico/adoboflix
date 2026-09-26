@@ -27,6 +27,10 @@ package source
 // Every id parameter and every ID field it returns is an opaque string as
 // described in the package doc.
 type Source interface {
+	// Name returns the adapter's registered name, e.g. "postgres-direct".
+	// Callers use it to name the active source in errors and logs.
+	Name() string
+
 	// GetStats returns aggregate library counts.
 	GetStats() (*Stats, error)
 

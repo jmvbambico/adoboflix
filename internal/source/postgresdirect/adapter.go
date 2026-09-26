@@ -27,8 +27,12 @@ import (
 // Name is the value of ADOBOFLIX_SOURCE that selects this adapter.
 const Name = "postgres-direct"
 
-// The adapter must satisfy the read-only boundary.
-var _ source.Source = (*Adapter)(nil)
+// The adapter must satisfy the read-only boundary, and it can enumerate the
+// whole library, so it also offers the optional probe-listing capability.
+var (
+	_ source.Source            = (*Adapter)(nil)
+	_ source.StreamProbeLister = (*Adapter)(nil)
+)
 
 func init() {
 	source.Register(Name, func(cfg source.Config) (source.Source, error) {
@@ -50,6 +54,9 @@ func New(db *sqlx.DB) (*Adapter, error) {
 	return &Adapter{db: db}, nil
 }
 
+// Name returns the adapter's registered name.
+func (a *Adapter) Name() string { return Name }
+
 // entryColumns lists the columns we explicitly select. Selecting "*" breaks
 // because the table has columns we intentionally do not surface (e.g.
 // check_status, last_check) and sqlx errors on unmapped destinations.
@@ -65,6 +72,13 @@ const channelColumns = `id, name, logo, category, epg_source_id, epg_channel_id,
 // streamColumns lists columns for stream queries.
 const streamColumns = `id, channel_id, label, url, source_type, drm_type, drm_k,
 	license_url, is_default, status, user_agent, referer, resolution, bitrate, created_at`
+
+// probeStreamColumns lists the columns a health probe needs, aliased to the
+// ProbeTarget db tags. Explicit, never "*": the streams table carries columns
+// this query does not map and sqlx errors on unmapped destinations.
+const probeStreamColumns = `s.channel_id, s.id, COALESCE(s.label, '') AS label, s.url,
+	s.user_agent, s.referer,
+	c.name, COALESCE(c.category, 'Unknown') AS category`
 
 // vodStreamColumns lists the columns we explicitly select. Selecting "*" breaks
 // because the table carries columns we intentionally do not surface (e.g.
@@ -324,4 +338,24 @@ func (a *Adapter) ResolveChannelStream(channelID string) (*source.Stream, error)
 		return nil, fmt.Errorf("resolve stream for channel %s: %w", channelID, err)
 	}
 	return &s, nil
+}
+
+// ListStreamsForProbe enumerates every probeable stream in the library with
+// its channel metadata. It implements the optional StreamProbeLister
+// capability: health scanning needs the whole library, which only a
+// database-backed adapter can see.
+//
+// Read-only: a single SELECT joining streams to channels. It selects the
+// probe's columns explicitly — never "*" — and skips rows with no usable URL.
+func (a *Adapter) ListStreamsForProbe() ([]source.ProbeTarget, error) {
+	targets := []source.ProbeTarget{}
+	query := `SELECT ` + probeStreamColumns + `
+		FROM streams s
+		JOIN channels c ON c.id = s.channel_id
+		WHERE s.url IS NOT NULL AND s.url != ''
+		ORDER BY c.name, s.is_default DESC`
+	if err := a.db.Select(&targets, query); err != nil {
+		return nil, fmt.Errorf("list streams for probe: %w", err)
+	}
+	return targets, nil
 }

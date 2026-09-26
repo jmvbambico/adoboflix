@@ -1,6 +1,9 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -8,9 +11,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/epg"
+	"github.com/jmvbambico/adoboflix/internal/scanner"
 	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
@@ -534,6 +539,108 @@ func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// Scan state is held in a package-level manager so the scan handlers stay
+// self-contained (they are the only handler code this feature owns).
+var (
+	scanMgrOnce sync.Once
+	scanMgr     *scanner.Manager
+	scanMgrErr  error
+)
+
+// scanManager builds the scan manager from the active source. Health scanning
+// is an OPTIONAL source capability: a source that cannot enumerate the whole
+// library's streams (an HTTP adapter that only ever sees one user's playlist,
+// say) yields a clear unsupported error. The handler never reaches around the
+// adapter for a database handle — the capability, or its absence, is the
+// whole boundary.
+func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
+	scanMgrOnce.Do(func() {
+		lister, ok := h.src.(source.StreamProbeLister)
+		if !ok {
+			scanMgrErr = source.UnsupportedScanError(h.src.Name())
+			return
+		}
+		scanMgr = scanner.NewManager(lister)
+	})
+	return scanMgr, scanMgrErr
+}
+
+// ScanChannels starts a background scan and returns immediately. A second
+// POST while one is running does not start a second scan; it returns the
+// in-progress status instead. Nothing is persisted upstream — the scan only
+// probes streams and aggregates an in-memory report.
 func (h *PlayerHandler) ScanChannels(c *gin.Context) {
-	c.JSON(http.StatusNotImplemented, gin.H{"message": "scan not implemented"})
+	mgr, err := h.scanManager()
+	if err != nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": err.Error()})
+		return
+	}
+	status, started := mgr.Start()
+	if !started {
+		c.JSON(http.StatusConflict, gin.H{
+			"status":  status,
+			"message": "a scan is already in progress",
+		})
+		return
+	}
+	c.JSON(http.StatusAccepted, gin.H{
+		"status":  status,
+		"message": "scan started",
+	})
+}
+
+// ScanStatus reports scan progress/completion for polling.
+func (h *PlayerHandler) ScanStatus(c *gin.Context) {
+	mgr, err := h.scanManager()
+	if err != nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": mgr.Status()})
+}
+
+// ScanReport serves the completed report as a downloadable file (JSON, or CSV
+// with ?format=csv) so the user can hand it to the operator out of band. The
+// report carries no resolvable stream URL — only the host and the final
+// manifest segment — so a shared report cannot reveal an upstream CDN.
+func (h *PlayerHandler) ScanReport(c *gin.Context) {
+	mgr, err := h.scanManager()
+	if err != nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": err.Error()})
+		return
+	}
+	report, err := mgr.Report()
+	switch {
+	case errors.Is(err, scanner.ErrScanInProgress):
+		c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	case errors.Is(err, scanner.ErrNoReport):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	case err != nil:
+		log.Printf("scan report: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load report"})
+		return
+	}
+
+	if c.DefaultQuery("format", "json") == "csv" {
+		var buf bytes.Buffer
+		if err := scanner.WriteCSV(&buf, report); err != nil {
+			log.Printf("scan report: render csv: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to render report"})
+			return
+		}
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", report.Filename(".csv")))
+		c.Data(http.StatusOK, "text/csv; charset=utf-8", buf.Bytes())
+		return
+	}
+
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		log.Printf("scan report: marshal json: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to render report"})
+		return
+	}
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=%q", report.Filename(".json")))
+	c.Data(http.StatusOK, "application/json", data)
 }
