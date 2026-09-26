@@ -12,12 +12,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jmvbambico/adoboflix/internal/db"
+	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
-// Service provides EPG data by reading the compiled XMLTV blob from the local database.
+// Service provides EPG data by decoding the compiled XMLTV blob supplied by
+// the active source adapter. Decompressing gzip and parsing XMLTV is identical
+// for every source, so it stays here; only the byte source differs, and that
+// is the optional source.CompiledEPGProvider capability.
 type Service struct {
-	db *db.DB
+	provider source.CompiledEPGProvider
 
 	mu            sync.RWMutex
 	programmes    []xmlProgramme
@@ -26,30 +29,30 @@ type Service struct {
 	dataHash      string
 }
 
-// NewService creates an EPG service and does an initial load.
-func NewService(database *db.DB) *Service {
-	s := &Service{db: database}
+// NewService creates an EPG service and does an initial load. An empty or
+// missing EPG is non-fatal: a fresh install with an empty compiled_epg table
+// still boots, and the service simply serves no programmes until data arrives.
+func NewService(provider source.CompiledEPGProvider) *Service {
+	s := &Service{provider: provider}
 	if err := s.Refresh(); err != nil {
 		log.Printf("[EPG] No EPG data available yet: %v (compiled_epg table may be empty)", err)
 	}
 	return s
 }
 
-// Refresh reloads the compiled EPG from the database into memory.
+// Refresh reloads the compiled EPG from the source into memory.
 func (s *Service) Refresh() error {
-	type compiledRow struct {
-		Data      []byte `db:"data"`
-		Hash      string `db:"hash"`
+	if s.provider == nil {
+		return fmt.Errorf("no EPG provider configured")
 	}
 
-	var row compiledRow
-	err := s.db.Get(&row, "SELECT data, hash FROM compiled_epg ORDER BY updated_at DESC LIMIT 1")
+	data, hash, err := s.provider.CompiledEPG()
 	if err != nil {
-		return fmt.Errorf("failed to read compiled_epg: %w", err)
+		return fmt.Errorf("failed to read compiled EPG blob: %w", err)
 	}
 
 	// Decompress gzip
-	gz, err := gzip.NewReader(bytes.NewReader(row.Data))
+	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("failed to create gzip reader: %w", err)
 	}
@@ -74,7 +77,7 @@ func (s *Service) Refresh() error {
 	s.programmes = tv.Programmes
 	s.channels = chMap
 	s.updatedAt = time.Now()
-	s.dataHash = hex.EncodeToString([]byte(row.Hash))
+	s.dataHash = hex.EncodeToString([]byte(hash))
 	s.mu.Unlock()
 
 	log.Printf("[EPG] Loaded %d programmes, %d channels from compiled EPG", len(tv.Programmes), len(tv.Channels))
