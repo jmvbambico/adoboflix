@@ -1,136 +1,126 @@
-![AdoboFlix](https://img.shields.io/badge/AdoboFlix-🎬-f59e0b?style=flat-square)
-
 # AdoboFlix
 
-**A self-hosted streaming media library server** with Go backend, React frontend, and Shaka Player DRM support.
+A local, self-hosted **player client for AdoboTV** with a Go backend, a React
+frontend, and Shaka Player DRM support.
 
-Browse, search, and stream your personal VOD library with a modern Bento Grid UI inspired by OhMyProxy's dark amber theme.
+AdoboFlix plays content. It owns no content, no accounts, and no playlists, and
+it is **read-only**: every query it issues against the AdoboTV database is a
+`SELECT`.
 
-> Forked from the original mpdumpy TugZ player — now standalone, open-source, and DRM-capable.
+There are two ways to use it:
+
+- **AdoboTV subscriber** — connect your playlist and stream your entitled
+  content through a modern web player.
+- **No account** — point it at your own playlist (JSON or M3U) and get the same
+  player.
+
+Both paths feed one internal library format; the player does not care where the
+content came from.
 
 ## Features
 
-- 🎥 **Shaka Player** — Widevine & Clearkey DRM support
-- 🎨 **Bento Grid UI** — modern, dark theme with amber accents
-- 📚 **1,700+ titles** — browse by provider, genre, and type
-- 🔍 **Full-text search** — instant title search with filters
-- 🎬 **HLS/MPEG-DASH proxy** — stream rewriting for all sources
-- ⚡ **Fast Go backend** — Gin + PostgreSQL, lightweight, sub-ms queries
-- 🖼️ **Responsive** — works on desktop and mobile
+- 🎥 **Shaka Player** — HLS, MPEG-DASH, Widevine & ClearKey DRM
+- 🎨 **Bento grid UI** — dark theme with amber accents
+- 🔍 **Browse & search** — filter by provider, genre, and type
+- 🎬 **Stream proxy** — rewrites and proxies HLS/DASH segments, forwarding DRM config
+- 📺 **IPTV channels** — browse channels, resolve streams, and read EPG
+- ⚡ **Go backend** — stdlib + Gin + sqlx
 
-## Quick Start
+## Quick start
 
-### Prerequisites
-
-- Go 1.21+
-- Node.js 18+
-- PostgreSQL database with a `vod_assets` table
-
-### 1. Clone & Build
+Prerequisites: Go 1.21+, Node.js 18+, and a PostgreSQL database (the AdoboTV
+schema, or your own).
 
 ```bash
 git clone https://github.com/jmvbambico/adoboflix.git
 cd adoboflix
+cp .env.example .env          # then set ADOBOFLIX_PG_URL
 
-# Build backend
-go build -o adoboflix ./cmd/server
-
-# Build frontend
 cd client && npm install && npm run build && cd ..
-```
 
-### 2. Configure Database
-
-Set your PostgreSQL connection string:
-
-```bash
-export ADOBOFLIX_PG_URL="postgres://user:pass@host:5432/dbname?sslmode=disable"
-```
-
-**Expected table schema:**
-
-```sql
-CREATE TABLE vod_assets (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    type TEXT,
-    category TEXT,
-    release_year TEXT,
-    plot TEXT,
-    poster TEXT,
-    stream_url TEXT,
-    drm_k TEXT,
-    drm_type TEXT,
-    source_type TEXT,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-```
-
-### 3. Run
-
-```bash
+go build -o adoboflix ./cmd/server
 ./adoboflix --port 5656
 ```
 
 Open **http://127.0.0.1:5656** in your browser.
 
-## API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/v1/stats` | Dashboard statistics |
-| GET | `/api/v1/entries` | Paginated entries with filters |
-| GET | `/api/v1/entry/:id` | Single entry detail |
-| GET | `/api/v1/search` | Full-text search |
-| GET | `/api/v1/providers` | List all providers |
-| GET | `/api/v1/genres` | List all genres |
-| GET | `/api/v1/resolve` | Resolve stream URL with DRM config |
-| GET | `/api/v1/proxy` | HLS/DASH stream proxy |
-
-### Query Parameters
-
-- `provider` — filter by source (Miruro, ReelPipe, etc.)
-- `genre` — filter by category (Action, Drama, etc.)
-- `type` — filter by content type (movie, tv)
-- `q` — search query
-- `page` — page number (default: 1)
-- `limit` — items per page (default: 200)
-
 ## Configuration
 
-All configuration is via environment variables:
+Configuration is via environment variables (`.env`, documented in
+`.env.example`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string |
-| `MPDUMPY_PG_URL` | — | Fallback PG URL (checked second) |
+| `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required) |
+| `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
+| `SERVER_HOST` | `0.0.0.0` | Bind address |
+| `SERVER_PORT` | `5656` | Port |
 
-### CLI Flags
+The CLI flags `--host` and `--port` override `SERVER_HOST` / `SERVER_PORT`.
 
-```bash
-./adoboflix --host 0.0.0.0 --port 5656
-```
+## Data source
+
+AdoboFlix reads the AdoboTV PostgreSQL schema — `vod_assets`, `episodes`,
+`channels`, `streams`, `playlist_*`, and the `compiled_epg` blob. **AdoboTV owns
+that schema**; this repository does not duplicate, migrate, or mutate it. See
+the AdoboTV project for the authoritative table definitions. Queries select
+explicit columns and are strictly read-only.
+
+Source adapters are interchangeable and read-only:
+
+- **`adobotv-http`** — production path; talks to AdoboTV over HTTP using the
+  user's playlist code.
+- **`file`** — a local playlist (JSON or M3U) for users with no account.
+- **`postgres-direct`** — a development test harness only. It bypasses
+  entitlement and analytics, must stay behind explicit configuration, and is
+  never the default.
+
+## API
+
+All routes are served under `/api/v1` on the app's own origin.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/stats` | Library statistics |
+| GET | `/api/v1/entries` | Paginated, filterable entries (`episode_count` for series) |
+| GET | `/api/v1/entry/:id` | Single entry detail |
+| GET | `/api/v1/search` | Title search with filters |
+| GET | `/api/v1/providers` | Distinct providers |
+| GET | `/api/v1/genres` | Distinct genres |
+| GET | `/api/v1/resolve` | Resolve an entry's stream URL + DRM config |
+| GET | `/api/v1/proxy` | HLS/DASH segment proxy |
+| GET | `/api/v1/episodes/:vodId` | Episodes for a series, plus its season list |
+| GET | `/api/v1/resolve/episode/:episodeId` | Resolve an episode's stream URL + DRM config |
+| GET | `/api/v1/channels` | Paginated IPTV channels |
+| GET | `/api/v1/channels/categories` | Distinct channel categories |
+| GET | `/api/v1/channels/:id` | Channel with its streams |
+| GET | `/api/v1/channels/:id/resolve` | Resolve a channel's default stream |
+| GET | `/api/v1/channels/:id/epg` | EPG entries for a channel |
+| POST | `/api/v1/channels/scan` | **Not implemented** — currently returns `501 Not Implemented` |
+
+### Query parameters
+
+- `provider` — filter by source
+- `genre` — filter by category
+- `type` — filter by content type
+- `q` — search query
+- `page` — page number (default: 1)
+- `limit` — items per page (default: 200)
 
 ## Architecture
 
 ```
 adoboflix/
-├── cmd/server/main.go      # Go entry point
+├── cmd/server/main.go      # entry point, route table
 ├── internal/
-│   ├── db/db.go            # PostgreSQL queries
-│   ├── handler/handler.go  # HTTP handlers
-│   └── middleware/         # CORS middleware
-├── client/                  # React frontend
-│   ├── src/
-│   │   ├── App.jsx         # Main layout + bento grid
-│   │   ├── components/
-│   │   │   ├── ShakaPlayer.jsx  # DRM player
-│   │   │   └── ...
-│   ├── package.json
-│   └── vite.config.js
-├── static/                  # Built frontend
-├── go.mod
+│   ├── db/                 # read-only queries against the AdoboTV schema
+│   ├── handler/            # HTTP handlers
+│   ├── epg/                # XMLTV decode from compiled_epg (gzipped blob)
+│   ├── scanner/            # stream health probing (reports only, never writes)
+│   └── middleware/         # CORS
+├── client/src/             # React 19 + Vite + Tailwind 4
+│   └── components/CustomPlayer.tsx   # Shaka Player — HLS, DASH, DRM
+├── static/                 # built client, served by the Go binary
 ├── Makefile
 └── README.md
 ```
@@ -138,10 +128,10 @@ adoboflix/
 ## Development
 
 ```bash
-# Terminal 1 — Backend
+# Terminal 1 — backend
 go run ./cmd/server
 
-# Terminal 2 — Frontend (hot reload)
+# Terminal 2 — frontend (hot reload)
 cd client && npm run dev
 ```
 

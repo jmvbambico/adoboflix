@@ -1,0 +1,89 @@
+# AdoboFlix orchestration contract.
+# AGENTS.md is authoritative; this file is its machine-readable companion.
+version: 1
+
+project:
+  name: adoboflix
+  role: client
+  summary: >
+    Local self-hosted player client for AdoboTV. Read-only against the AdoboTV
+    platform. Owns no content, no accounts, no playlists.
+
+branches:
+  integration_base: main
+  auto_merge_target: main
+  protected:
+    - main
+  task_prefix: task/
+
+# The full gate. All three are worker-scope: fast, hermetic, no shared state,
+# so parallel workers in separate worktrees may each run the whole set.
+gates:
+  - name: build
+    scope: worker
+    command: go build ./cmd/server
+  - name: vet
+    scope: worker
+    command: go vet ./...
+  - name: client-lint
+    scope: worker
+    command: npm run lint
+    cwd: client
+# No integration suite exists yet. When one is added, give it scope: integration
+# so it runs only on the integration branch.
+
+# Paths agents must not modify.
+never_write:
+  - vendor/**          # go mod vendor output
+  - static/**          # built client
+  - client/dist/**     # built client
+  - .env               # real credentials
+  - client/node_modules/**
+
+# Hard constraints. A violation fails review regardless of gate status.
+invariants:
+  - id: no-upstream-writes
+    severity: blocking
+    rule: >
+      No INSERT, UPDATE, DELETE, CREATE, DROP, ALTER or TRUNCATE may be issued
+      against the AdoboTV database. AdoboFlix is read-only against every table
+      it touches. Persist locally or not at all.
+    detect: >
+      Flag any Go string literal reaching sqlx/database/sql that contains
+      INSERT, UPDATE, DELETE, CREATE, DROP, ALTER or TRUNCATE.
+  - id: no-playlist-mutation
+    severity: blocking
+    rule: >
+      playlists, playlist_channels, channels, streams and vod_assets are
+      AdoboTV's. AdoboFlix reads them and never repairs, rebuilds or prunes them.
+  - id: scan-reports-only
+    severity: blocking
+    rule: >
+      Stream health scanning produces an in-memory result and a downloadable
+      report. It never persists check_status or last_check upstream.
+  - id: adapters-are-read-only
+    severity: blocking
+    rule: >
+      Every source adapter (adobotv-http, file, postgres-direct) implements a
+      read-only interface. postgres-direct is a development test harness, must
+      stay behind explicit configuration, and must never be the default.
+  - id: explicit-columns
+    severity: warning
+    rule: >
+      Never SELECT * against the AdoboTV schema; it carries unmapped columns
+      that break sqlx scanning. Enumerate columns explicitly.
+
+merge_policy:
+  enabled: true
+  require_full_gate: true
+  require_review: true
+  review_must_be_cross_vendor: true
+  allow_direct_push_to_protected: false
+
+review:
+  focus:
+    - Any write path reaching the AdoboTV database (blocking)
+    - Adapter boundary leaks — DB access outside the postgres-direct adapter
+    - Entitlement bypass: content fetched without going through /v1/play/*
+    - sqlx scan correctness against explicit column lists
+    - Unhandled errors and nil-pointer derefs on the optional-field structs

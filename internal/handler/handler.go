@@ -3,6 +3,7 @@ package handler
 import (
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
+	"github.com/lib/pq"
 )
 
 type PlayerHandler struct {
@@ -55,14 +57,42 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 		EpisodeCount *int `json:"episode_count,omitempty"`
 	}
 	enriched := make([]enrichedEntry, len(entries))
+
+	// Collect the Series IDs on this page and resolve every episode count in a
+	// single aggregate query instead of one GetEpisodes call per entry.
+	seriesIDs := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.Type == "Series" {
+			seriesIDs = append(seriesIDs, e.ID)
+		}
+	}
+
+	episodeCounts := map[string]int{}
+	countsAvailable := false
+	if len(seriesIDs) > 0 {
+		type countRow struct {
+			VodID string `db:"vod_id"`
+			Count int    `db:"episode_count"`
+		}
+		var rows []countRow
+		query := `SELECT vod_id, COUNT(*) AS episode_count FROM episodes WHERE vod_id = ANY($1) GROUP BY vod_id`
+		if err := h.db.Select(&rows, query, pq.Array(seriesIDs)); err != nil {
+			// Do not report a misleading 0 for every Series: leave the field
+			// absent, exactly as when the count lookup was unavailable.
+			log.Printf("entries: episode count query failed for %d series: %v", len(seriesIDs), err)
+		} else {
+			countsAvailable = true
+			for _, r := range rows {
+				episodeCounts[r.VodID] = r.Count
+			}
+		}
+	}
+
 	for i, e := range entries {
 		enriched[i].Entry = e
-		if e.Type == "Series" {
-			episodes, _, err := h.db.GetEpisodes(e.ID)
-			if err == nil {
-				count := len(episodes)
-				enriched[i].EpisodeCount = &count
-			}
+		if e.Type == "Series" && countsAvailable {
+			count := episodeCounts[e.ID]
+			enriched[i].EpisodeCount = &count
 		}
 	}
 
@@ -118,6 +148,45 @@ func (h *PlayerHandler) GetGenres(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"genres": genres})
 }
 
+// derefString safely unwraps a nullable *string into a plain string.
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// buildProxyURL wraps a raw stream URL through /api/v1/proxy exactly the way
+// resolve has always done: QueryEscape the url, append &source=, then optional
+// &ua= / &ref= when the stream carries its own headers.
+func buildProxyURL(scheme, host, rawURL, sourceType, ua, ref string) string {
+	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
+		scheme, host, url.QueryEscape(rawURL), sourceType)
+	if ua != "" {
+		proxyURL += "&ua=" + url.QueryEscape(ua)
+	}
+	if ref != "" {
+		proxyURL += "&ref=" + url.QueryEscape(ref)
+	}
+	return proxyURL
+}
+
+// resolveAlternate is one non-primary stream from vod_streams, already wrapped
+// through the proxy so it is directly playable. Additive field on /api/v1/resolve.
+type resolveAlternate struct {
+	URL        string `json:"url"`
+	Provider   string `json:"provider"`
+	SourceType string `json:"source_type"`
+	DrmType    string `json:"drm_type"`
+	DrmK       string `json:"drm_k"`
+	LicenseURL string `json:"license_url"`
+	UserAgent  string `json:"user_agent"`
+	Referer    string `json:"referer"`
+	Label      string `json:"label"`
+	Resolution string `json:"resolution,omitempty"`
+	Bitrate    *int   `json:"bitrate,omitempty"`
+}
+
 func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	id := c.Query("id")
 	if id == "" {
@@ -126,7 +195,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	}
 
 	entry, err := h.db.GetEntry(id)
-	if err != nil || entry.StreamURL == nil {
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
 		return
 	}
@@ -136,41 +205,73 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 		scheme = "https"
 	}
 
-	ua := ""
-	if entry.UserAgent != nil {
-		ua = *entry.UserAgent
+	// Prefer the authoritative vod_streams rows; fall back silently to the
+	// denormalized vod_assets.stream_url cache when the asset has none.
+	//
+	// Zero rows and a query error mean different things: zero rows is an
+	// expected state (the asset genuinely has no vod_streams row), while an
+	// error is a fault. Both still fall back so playback keeps working, but a
+	// fault must be visible in the logs rather than silently serving the
+	// stale stream_url cache.
+	vodStreams, streamErr := h.db.GetVodStreams(entry.ID)
+	if streamErr != nil {
+		log.Printf("resolve: GetVodStreams(%s) failed, falling back to cached stream_url: %v", entry.ID, streamErr)
 	}
-	ref := ""
-	if entry.Referer != nil {
-		ref = *entry.Referer
+	if streamErr == nil && len(vodStreams) > 0 {
+		primary := vodStreams[0]
+
+		// Per-stream headers: these CDNs reject requests with the wrong
+		// Referer, so each stream carries its own user_agent/referer.
+		ua := derefString(primary.UserAgent)
+		ref := derefString(primary.Referer)
+		proxyURL := buildProxyURL(scheme, c.Request.Host, primary.URL, primary.SourceType, ua, ref)
+
+		alternates := make([]resolveAlternate, 0, len(vodStreams)-1)
+		for _, s := range vodStreams[1:] {
+			altUA := derefString(s.UserAgent)
+			altRef := derefString(s.Referer)
+			alternates = append(alternates, resolveAlternate{
+				URL:        buildProxyURL(scheme, c.Request.Host, s.URL, s.SourceType, altUA, altRef),
+				Provider:   s.SourceType,
+				SourceType: s.SourceType,
+				DrmType:    derefString(s.DrmType),
+				DrmK:       derefString(s.DrmK),
+				LicenseURL: derefString(s.LicenseURL),
+				UserAgent:  altUA,
+				Referer:    altRef,
+				Label:      s.Label,
+				Resolution: derefString(s.Resolution),
+				Bitrate:    s.Bitrate,
+			})
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"url": proxyURL, "provider": primary.SourceType,
+			"drm_type": derefString(primary.DrmType), "drm_k": derefString(primary.DrmK),
+			"license_url": derefString(primary.LicenseURL),
+			"user_agent": ua, "referer": ref,
+			"alternates": alternates,
+		})
+		return
 	}
 
-	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
-		scheme, c.Request.Host, url.QueryEscape(*entry.StreamURL), entry.SourceType)
-	if ua != "" {
-		proxyURL += "&ua=" + url.QueryEscape(ua)
-	}
-	if ref != "" {
-		proxyURL += "&ref=" + url.QueryEscape(ref)
+	// Fallback: asset has no vod_streams rows (or the lookup failed) — play
+	// the cached vod_assets.stream_url, exactly as before.
+	if entry.StreamURL == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
+		return
 	}
 
-	drmType := ""
-	if entry.DrmType != nil {
-		drmType = *entry.DrmType
-	}
-	drmK := ""
-	if entry.DrmK != nil {
-		drmK = *entry.DrmK
-	}
-	licenseURL := ""
-	if entry.LicenseURL != nil {
-		licenseURL = *entry.LicenseURL
-	}
+	ua := derefString(entry.UserAgent)
+	ref := derefString(entry.Referer)
+	proxyURL := buildProxyURL(scheme, c.Request.Host, *entry.StreamURL, entry.SourceType, ua, ref)
 
 	c.JSON(http.StatusOK, gin.H{
 		"url": proxyURL, "provider": entry.SourceType,
-		"drm_type": drmType, "drm_k": drmK, "license_url": licenseURL,
+		"drm_type": derefString(entry.DrmType), "drm_k": derefString(entry.DrmK),
+		"license_url": derefString(entry.LicenseURL),
 		"user_agent": ua, "referer": ref,
+		"alternates": []resolveAlternate{},
 	})
 }
 
