@@ -190,8 +190,36 @@ An unrecognised device does **not** get the playlist. It gets
 `serveSplashM3U`. A new user's first connect lands in the operator's device
 queue and stays on splash until approved.
 
-The adapter must detect the splash response and report **"device pending
-approval"**. It must not render it as an empty library.
+**The splash response is the single worst trap in this API.** It is not an
+error shape:
+
+```
+HTTP 200 OK
+Content-Type: application/vnd.apple.mpegurl
+
+#EXTM3U
+#EXTINF:-1 tvg-id="AdoboTV" tvg-name="AdoboTV" ... ,AdoboTV
+https://raw.githubusercontent.com/.../unauthorized.m3u
+```
+
+A `200`, with an M3U body, **even when the caller asked for JSON**. An adapter
+that trusts the status code and calls `json.Unmarshal` gets a parse error and
+reports "malformed playlist" — when the truth is "your device is waiting for
+the operator to approve it."
+
+So: on a `2xx` from `/v1/playlist/:code`, sniff the body before parsing. A body
+whose first non-whitespace bytes are `#EXTM3U` while JSON was requested is the
+pending-device signal, and must surface as **"device pending approval"** with
+the operator's queue named as the next step. The splash URL is configurable
+(`unauthorized_m3u_url`), so match on the `#EXTM3U` shape, never on that URL.
+
+**Every first connect hits this path.** Device identity is
+`ComputeDeviceHash(user.Email, GetDeviceIdentifier(userAgent), salt)`, and
+`GetDeviceIdentifier` returns the **raw User-Agent string** unless it can
+extract a hardware id from it. A new UA is therefore a new device. AdoboFlix
+cannot avoid the queue on first run, and should not try to: presenting a UA
+copied from an existing approved device to skip approval would defeat the
+operator's device limits.
 
 ### 2. Account status — stricter for playback than for the playlist
 
@@ -225,6 +253,39 @@ audit logs and device records, not to unblock it. `format=m3u_native` skips
 the check entirely.
 
 ---
+
+## Verifying the HTTP adapter locally
+
+AdoboTV can be run on this machine, so the adapter is verifiable end to end
+rather than against fixtures alone. `~/projects/adobotv-server` is already
+configured for it: `SERVER_ENV=development`, `SERVER_URL=http://127.0.0.1:8080`,
+and `DATABASE_URL` pointing at the same local `127.0.0.1:5432/adobotv` database
+AdoboFlix reads. The local library has 29 active users, all with playlist codes,
+and 65 approved devices.
+
+Three cautions, in order of how much they matter:
+
+1. **Do not source that repo's `.env` wholesale.** It also holds
+   `HEROKU_API_KEY` and `PRODUCTION_*` credentials. Pass an explicit minimal
+   environment instead (`DATABASE_URL`, `ENCRYPTION_KEY`, `JWT_SECRET`,
+   `DEVICE_HASHING_SALT`, `SERVER_PORT`, `SERVER_ENV=development`), and run no
+   `heroku` or deploy command.
+2. **AdoboTV writing to that database is expected and is not an AdoboFlix
+   violation.** Serving a playlist updates `users.last_login`, may create a
+   `devices` row, and records analytics — that is its job. The First Law binds
+   AdoboFlix, not AdoboTV. Do not read a moved `last_login` as a breach; check
+   what *AdoboFlix* issued.
+3. **The HTTP adapter touches no database at all.** It is an HTTP client, so
+   the read-only invariant is satisfied structurally. What needs verifying is
+   envelope parsing, `runtime_attr_url` resolution, and the three gates above.
+
+What can be verified without mutating the platform: the envelope fetch and
+parse, the **pending-device** path (the first connect produces it by
+construction), the **inactive/expired** path (a user whose status is not
+`active` fetches a playlist and then fails every playable call), and a bad
+playlist code. Reaching *content* requires an operator to approve the device
+— one write to AdoboTV's `devices` table, which is the operator's call and not
+the client's.
 
 ## Why not the database
 
