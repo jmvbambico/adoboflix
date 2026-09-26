@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/epg"
@@ -540,10 +541,12 @@ func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 }
 
 // Scan state is held in a package-level manager so the scan handlers stay
-// self-contained (they are the only handler code this feature owns).
+// self-contained (they are the only handler code this feature owns). The
+// manager is published through an atomic pointer so the shutdown path can
+// reach it without racing the lazy construction.
 var (
 	scanMgrOnce sync.Once
-	scanMgr     *scanner.Manager
+	scanMgrPtr  atomic.Pointer[scanner.Manager]
 	scanMgrErr  error
 )
 
@@ -560,9 +563,25 @@ func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
 			scanMgrErr = source.UnsupportedScanError(h.src.Name())
 			return
 		}
-		scanMgr = scanner.NewManager(lister)
+		scanMgrPtr.Store(scanner.NewManager(lister))
 	})
-	return scanMgr, scanMgrErr
+	if scanMgrErr != nil {
+		return nil, scanMgrErr
+	}
+	return scanMgrPtr.Load(), nil
+}
+
+// CancelActiveScan cancels an in-flight scan, if one was ever started. The
+// server calls it from its shutdown path so probes stop promptly instead of
+// running out their per-probe deadlines and the five-minute scan budget.
+//
+// It deliberately does NOT construct the manager: when no scan was ever
+// requested the pointer is nil and this is a harmless no-op. Shutdown must
+// never bring a manager — or the lister capability behind it — into existence.
+func CancelActiveScan() {
+	if m := scanMgrPtr.Load(); m != nil {
+		m.Cancel()
+	}
 }
 
 // ScanChannels starts a background scan and returns immediately. A second

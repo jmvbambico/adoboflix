@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -124,7 +130,34 @@ func main() {
 	fmt.Printf("\n🎬 AdoboFlix: http://%s\n", addr)
 	fmt.Printf("📺 IPTV Channels, VOD with DRM support, and EPG\n\n")
 
-	if err := r.Run(addr); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	// Shut down gracefully on SIGINT/SIGTERM. A scan is not an HTTP handler, so
+	// http.Server.Shutdown alone would leave an in-flight scan's probes running
+	// out their per-probe deadlines and the five-minute budget before the
+	// process could exit; the scan is cancelled explicitly below.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Printf("[shutdown] signal received, stopping")
+
+	// Cancel an in-flight scan before waiting on HTTP shutdown. This is a no-op
+	// when no scan was ever requested — it never constructs the scan manager.
+	handler.CancelActiveScan()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[shutdown] http server: %v", err)
 	}
 }

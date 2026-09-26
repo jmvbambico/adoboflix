@@ -91,7 +91,11 @@ func (m *Manager) Start() (Status, bool) {
 }
 
 // Cancel aborts a running scan (context cancellation is honored by RunScan).
-// Intended for shutdown wiring; a cancelled scan keeps its partial report.
+// Intended for shutdown wiring. A cancelled scan ends in StateCancelled and a
+// truncated run is deliberately NOT published as a report: Report() returns
+// ErrNoReport so a partial scan can never be mistaken for a complete one.
+// Calling it when no scan is running — including on a manager that never
+// started one — is a harmless no-op.
 func (m *Manager) Cancel() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -155,22 +159,34 @@ func (m *Manager) run(ctx context.Context) {
 	defer m.mu.Unlock()
 	m.finishedAt = time.Now().UTC()
 	m.cancel = nil
-	if report != nil {
-		m.report = report
-		m.total = report.TotalStreams
-		m.probed = len(report.Streams)
-		m.alive = report.AliveStreams
-	}
 	switch {
 	case err == nil:
 		m.state = StateDone
+		if report != nil {
+			m.publishLocked(report)
+		}
 	case errors.Is(err, context.Canceled):
+		// A cancelled scan is a truncated run. It is reported as StateCancelled
+		// with its partial result deliberately left unpublished, so Report()
+		// never hands back an incomplete scan as if it were the finished one.
 		m.state = StateCancelled
 		m.errMsg = err.Error()
 	default:
 		m.state = StateError
 		m.errMsg = err.Error()
+		if report != nil {
+			m.publishLocked(report)
+		}
 	}
+}
+
+// publishLocked records a completed report and its aggregate counts. Callers
+// must hold m.mu.
+func (m *Manager) publishLocked(report *Report) {
+	m.report = report
+	m.total = report.TotalStreams
+	m.probed = len(report.Streams)
+	m.alive = report.AliveStreams
 }
 
 // onProgress records live probe counts for the status endpoint.
