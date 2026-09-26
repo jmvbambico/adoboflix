@@ -67,6 +67,18 @@ invariants:
       Every source adapter (adobotv-http, file, postgres-direct) implements a
       read-only interface. postgres-direct is a development test harness, must
       stay behind explicit configuration, and must never be the default.
+  - id: never-expose-real-stream-urls
+    severity: blocking
+    rule: >
+      AdoboTV withholds real stream URLs from playlist envelopes on purpose:
+      channels[].url carries a decoy (the channel_url_placeholder setting) so
+      that a leaked or shared playlist does not reveal the upstream CDN, and
+      the real source is reached only through runtime_attr_url. AdoboFlix must
+      never write a resolvable stream URL into that field, nor into any
+      playlist, report or export it produces. A change that makes the decoy
+      field resolvable removes a security property of the platform, however
+      much it looks like a bug fix.
+
   - id: explicit-columns
     severity: warning
     rule: >

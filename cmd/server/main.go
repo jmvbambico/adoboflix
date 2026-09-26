@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
@@ -13,6 +19,10 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
+	"github.com/jmvbambico/adoboflix/internal/source"
+
+	// Adapters register themselves with internal/source from their init.
+	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
 
 func main() {
@@ -39,12 +49,27 @@ func main() {
 		log.Printf("[env] no .env file found, using environment variables")
 	}
 
+	// Select the content source before touching the database. There is no
+	// default: an unset ADOBOFLIX_SOURCE is a startup error, never a silent
+	// fallback to the postgres-direct development tap.
+	sourceName := os.Getenv(source.EnvSource)
+	if err := source.Validate(sourceName); err != nil {
+		log.Fatalf("Source configuration: %v", err)
+	}
+
 	// Initialize database connection
 	database, err := db.Connect()
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// Open the selected source adapter. Handlers only ever see this interface.
+	playerSource, err := source.Open(source.Config{Name: sourceName, DB: database.DB})
+	if err != nil {
+		log.Fatalf("Failed to open source %q: %v", sourceName, err)
+	}
+	log.Printf("[source] using %q", sourceName)
 
 	// Initialize EPG service (non-fatal if compiled_epg is empty)
 	epgService := epg.NewService(database)
@@ -57,7 +82,7 @@ func main() {
 	r.Use(middleware.CORS())
 
 	// Initialize handlers
-	playerHandler := handler.NewPlayerHandler(database).WithEPG(epgService)
+	playerHandler := handler.NewPlayerHandler(playerSource).WithEPG(epgService)
 
 	// API routes
 	api := r.Group("/api/v1")
@@ -80,6 +105,8 @@ func main() {
 		api.GET("/channels/:id/resolve", playerHandler.ResolveChannelStream)
 		api.GET("/channels/:id/epg", playerHandler.GetChannelEPG)
 		api.POST("/channels/scan", playerHandler.ScanChannels)
+		api.GET("/channels/scan/status", playerHandler.ScanStatus)
+		api.GET("/channels/scan/report", playerHandler.ScanReport)
 	}
 
 	// Serve built client assets.
@@ -103,7 +130,34 @@ func main() {
 	fmt.Printf("\n🎬 AdoboFlix: http://%s\n", addr)
 	fmt.Printf("📺 IPTV Channels, VOD with DRM support, and EPG\n\n")
 
-	if err := r.Run(addr); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: r,
+	}
+
+	// Shut down gracefully on SIGINT/SIGTERM. A scan is not an HTTP handler, so
+	// http.Server.Shutdown alone would leave an in-flight scan's probes running
+	// out their per-probe deadlines and the five-minute budget before the
+	// process could exit; the scan is cancelled explicitly below.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("Server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Printf("[shutdown] signal received, stopping")
+
+	// Cancel an in-flight scan before waiting on HTTP shutdown. This is a no-op
+	// when no scan was ever requested — it never constructs the scan manager.
+	handler.CancelActiveScan()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("[shutdown] http server: %v", err)
 	}
 }
