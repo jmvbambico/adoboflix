@@ -5,6 +5,56 @@ import { Video, Episode } from "../types";
 // from the same origin, so a relative base works everywhere.
 const API_BASE = "/api/v1";
 
+// A non-OK response from the Go backend, keeping the machine-readable "code"
+// the handler attaches (internal/handler/source_error.go) so callers and
+// components branch on a constant instead of substring-matching a sentence.
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function isApiError(err: unknown): err is ApiError {
+  return err instanceof ApiError;
+}
+
+// React Query retry policy. Only failures that can clear on their own are
+// retried: a 4xx is a settled answer (a 403 gate needs a human to act, a 404
+// is a miss), so retrying it is churn that delays the message reaching the
+// user. 5xx and transport failures keep a small bounded retry.
+const MAX_QUERY_RETRIES = 2;
+
+export function shouldRetryQuery(failureCount: number, error: unknown): boolean {
+  if (isApiError(error) && error.status >= 400 && error.status < 500) return false;
+  return failureCount < MAX_QUERY_RETRIES;
+}
+
+// Parse a non-OK body into an ApiError. The backend writes
+// {"error": "...", "code": "..."}; when the body is not that envelope (a
+// plain-text or empty 5xx, a proxy error page) fall back to the previous
+// string so the message is never empty.
+export function apiErrorFromResponse(status: number, url: string, body: string): ApiError {
+  let message = `API ${status} ${url}: ${body.slice(0, 200)}`;
+  let code: string | undefined;
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed && typeof parsed === "object") {
+      const envelope = parsed as { error?: unknown; code?: unknown };
+      if (typeof envelope.error === "string" && envelope.error) message = envelope.error;
+      if (typeof envelope.code === "string" && envelope.code) code = envelope.code;
+    }
+  } catch {
+    // Not JSON — keep the fallback message.
+  }
+  return new ApiError(message, status, code);
+}
+
 // Raw shape returned by the Go backend (maps public.vod_assets).
 export interface BackendEntry {
   id: string;
@@ -117,7 +167,7 @@ async function getJSON<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new Error(`API ${res.status} ${url}: ${body.slice(0, 200)}`);
+    throw apiErrorFromResponse(res.status, url, body);
   }
   return res.json() as Promise<T>;
 }

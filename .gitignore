@@ -29,6 +29,10 @@ node_modules/
 client/dist/
 static/
 
+# Local verification output (make verify-playback)
+/verifyplayback
+/playback-report.json
+
 # OS
 .DS_Store
 Thumbs.db
