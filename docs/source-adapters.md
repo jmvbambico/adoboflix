@@ -73,13 +73,25 @@ those URLs itself — it follows them.
 `subscription_tiers` setting (live value: `Basic,Standard,Elite,Premium`).
 Otherwise it is `0` — absence is not an error.
 
-### ⚠ `channels[].url` is a decoy — do not play it
+### `channels[].url` is a decoy — by design
 
-It is the `channel_url_placeholder` setting, whose **live value is
-`https://www.youtube.com/watch?v=dQw4w9WgXcQ`**. An adapter that naively
-reads `url` will rickroll every viewer.
+It is the `channel_url_placeholder` setting, whose live value is
+`https://www.youtube.com/watch?v=dQw4w9WgXcQ`.
 
-The playable path is **always `runtime_attr_url`**.
+**This is deliberate and must be preserved.** The real source is withheld from
+the playlist envelope so that only a real client knows where to look, and
+someone reading an intercepted or shared playlist cannot sniff out the upstream
+CDN. The decoy is a security property of the platform, not an oversight.
+
+Two consequences, and the second is the one that bites:
+
+1. An adapter that reads `url` will play the decoy. The playable path is
+   **always `runtime_attr_url`**.
+2. **Do not "fix" this.** Putting a real URL into `channels[].url` — in
+   AdoboTV or in any client that re-serialises a playlist — silently removes
+   the protection. If a future change makes `url` look like a bug, it is not.
+   Neither AdoboFlix nor any adapter may write a resolvable stream URL into
+   that field, or into any playlist it exports.
 
 ### Resolving `runtime_attr_url`
 
