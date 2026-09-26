@@ -22,6 +22,7 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/source"
 
 	// Adapters register themselves with internal/source from their init.
+	_ "github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
 
