@@ -13,6 +13,10 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
+	"github.com/jmvbambico/adoboflix/internal/source"
+
+	// Adapters register themselves with internal/source from their init.
+	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
 
 func main() {
@@ -39,12 +43,27 @@ func main() {
 		log.Printf("[env] no .env file found, using environment variables")
 	}
 
+	// Select the content source before touching the database. There is no
+	// default: an unset ADOBOFLIX_SOURCE is a startup error, never a silent
+	// fallback to the postgres-direct development tap.
+	sourceName := os.Getenv(source.EnvSource)
+	if err := source.Validate(sourceName); err != nil {
+		log.Fatalf("Source configuration: %v", err)
+	}
+
 	// Initialize database connection
 	database, err := db.Connect()
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+	// Open the selected source adapter. Handlers only ever see this interface.
+	playerSource, err := source.Open(source.Config{Name: sourceName, DB: database.DB})
+	if err != nil {
+		log.Fatalf("Failed to open source %q: %v", sourceName, err)
+	}
+	log.Printf("[source] using %q", sourceName)
 
 	// Initialize EPG service (non-fatal if compiled_epg is empty)
 	epgService := epg.NewService(database)
@@ -57,7 +76,7 @@ func main() {
 	r.Use(middleware.CORS())
 
 	// Initialize handlers
-	playerHandler := handler.NewPlayerHandler(database).WithEPG(epgService)
+	playerHandler := handler.NewPlayerHandler(playerSource).WithEPG(epgService)
 
 	// API routes
 	api := r.Group("/api/v1")

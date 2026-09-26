@@ -10,18 +10,17 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
-	"github.com/lib/pq"
+	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
 type PlayerHandler struct {
-	db  *db.DB
+	src source.Source
 	epg *epg.Service
 }
 
-func NewPlayerHandler(database *db.DB) *PlayerHandler {
-	return &PlayerHandler{db: database}
+func NewPlayerHandler(src source.Source) *PlayerHandler {
+	return &PlayerHandler{src: src}
 }
 
 func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
@@ -30,7 +29,7 @@ func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
 }
 
 func (h *PlayerHandler) GetStats(c *gin.Context) {
-	stats, err := h.db.GetStats()
+	stats, err := h.src.GetStats()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -45,7 +44,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
 
-	entries, total, err := h.db.GetEntries(provider, genre, contentType, page, limit)
+	entries, total, err := h.src.GetEntries(provider, genre, contentType, page, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -53,13 +52,13 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 
 	// Attach episode counts for Series entries
 	type enrichedEntry struct {
-		db.Entry
+		source.Entry
 		EpisodeCount *int `json:"episode_count,omitempty"`
 	}
 	enriched := make([]enrichedEntry, len(entries))
 
-	// Collect the Series IDs on this page and resolve every episode count in a
-	// single aggregate query instead of one GetEpisodes call per entry.
+	// Collect the Series ids on this page and resolve every episode count in a
+	// single call instead of one per entry.
 	seriesIDs := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.Type == "Series" {
@@ -70,21 +69,14 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 	episodeCounts := map[string]int{}
 	countsAvailable := false
 	if len(seriesIDs) > 0 {
-		type countRow struct {
-			VodID string `db:"vod_id"`
-			Count int    `db:"episode_count"`
-		}
-		var rows []countRow
-		query := `SELECT vod_id, COUNT(*) AS episode_count FROM episodes WHERE vod_id = ANY($1) GROUP BY vod_id`
-		if err := h.db.Select(&rows, query, pq.Array(seriesIDs)); err != nil {
+		counts, err := h.src.EpisodeCounts(seriesIDs)
+		if err != nil {
 			// Do not report a misleading 0 for every Series: leave the field
 			// absent, exactly as when the count lookup was unavailable.
 			log.Printf("entries: episode count query failed for %d series: %v", len(seriesIDs), err)
 		} else {
 			countsAvailable = true
-			for _, r := range rows {
-				episodeCounts[r.VodID] = r.Count
-			}
+			episodeCounts = counts
 		}
 	}
 
@@ -103,7 +95,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetEntry(c *gin.Context) {
-	entry, err := h.db.GetEntry(c.Param("id"))
+	entry, err := h.src.GetEntry(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found"})
 		return
@@ -119,7 +111,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
 
-	entries, total, err := h.db.Search(q, provider, genre, contentType, page, limit)
+	entries, total, err := h.src.Search(q, provider, genre, contentType, page, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -131,7 +123,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetProviders(c *gin.Context) {
-	providers, err := h.db.GetProviders()
+	providers, err := h.src.GetProviders()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -140,7 +132,7 @@ func (h *PlayerHandler) GetProviders(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetGenres(c *gin.Context) {
-	genres, err := h.db.GetGenres()
+	genres, err := h.src.GetGenres()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -194,7 +186,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 		return
 	}
 
-	entry, err := h.db.GetEntry(id)
+	entry, err := h.src.GetEntry(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
 		return
@@ -213,7 +205,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	// error is a fault. Both still fall back so playback keeps working, but a
 	// fault must be visible in the logs rather than silently serving the
 	// stale stream_url cache.
-	vodStreams, streamErr := h.db.GetVodStreams(entry.ID)
+	vodStreams, streamErr := h.src.GetVodStreams(entry.ID)
 	if streamErr != nil {
 		log.Printf("resolve: GetVodStreams(%s) failed, falling back to cached stream_url: %v", entry.ID, streamErr)
 	}
@@ -282,7 +274,7 @@ func (h *PlayerHandler) GetEpisodes(c *gin.Context) {
 		return
 	}
 
-	episodes, _, err := h.db.GetEpisodes(vodID)
+	episodes, err := h.src.GetEpisodes(vodID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No episodes found"})
 		return
@@ -311,7 +303,7 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 		return
 	}
 
-	episode, err := h.db.GetEpisode(episodeID)
+	episode, err := h.src.GetEpisode(episodeID)
 	if err != nil || episode.StreamURL == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Episode not found or no stream URL"})
 		return
@@ -460,7 +452,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	channels, total, err := h.db.ListChannels(category, limit, (page-1)*limit)
+	channels, total, err := h.src.ListChannels(category, limit, (page-1)*limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -470,7 +462,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
-	cats, err := h.db.ListChannelCategories()
+	cats, err := h.src.ListChannelCategories()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -480,7 +472,7 @@ func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
 
 func (h *PlayerHandler) GetChannel(c *gin.Context) {
 	id := c.Param("id")
-	channel, streams, err := h.db.GetChannelWithStreams(id)
+	channel, streams, err := h.src.GetChannelWithStreams(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
 		return
@@ -490,7 +482,7 @@ func (h *PlayerHandler) GetChannel(c *gin.Context) {
 
 func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 	id := c.Param("id")
-	stream, err := h.db.ResolveChannelStream(id)
+	stream, err := h.src.ResolveChannelStream(id)
 	if err != nil || stream == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Stream not found"})
 		return
@@ -527,7 +519,7 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 
 func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 	id := c.Param("id")
-	channel, err := h.db.GetChannel(id)
+	channel, err := h.src.GetChannel(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
 		return
