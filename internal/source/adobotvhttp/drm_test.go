@@ -243,3 +243,72 @@ func TestResolveMalformedDRMBody(t *testing.T) {
 		t.Errorf("malformed body read as the m3u format hazard: %v", err)
 	}
 }
+
+// A ClearKey pair under a "no DRM" drm_type must be kept as the decryption key,
+// never injected into the URL as userinfo. "kid:key" and "user:pass" have
+// identical punctuation, so the hex halves are the evidence that separates them.
+func TestApplyDRMClearKeyPairUnderNoDRMTypeIsProtected(t *testing.T) {
+	const kid = "00112233445566778899aabbccddeeff"
+	const key = "ffeeddccbbaa99887766554433221100"
+	for _, drmType := range []string{"m3u", ""} {
+		rs := applyDRM(drmDetails{DrmType: drmType, DrmKey: kid + ":" + key, URL: "https://cdn.example/x/index.mpd"})
+		if rs.DrmK == nil || *rs.DrmK != kid+":"+key {
+			t.Errorf("drm_type %q: DrmK = %v, want the ClearKey pair preserved", drmType, rs.DrmK)
+		}
+		if rs.DrmType == nil || *rs.DrmType != "Clearkey" {
+			t.Errorf("drm_type %q: DrmType = %v, want Clearkey", drmType, rs.DrmType)
+		}
+		if strings.Contains(rs.URL, "@") {
+			t.Errorf("drm_type %q: URL = %q, want no userinfo for a ClearKey pair", drmType, rs.URL)
+		}
+	}
+}
+
+// Genuine credentials are widened: a password may contain ':', '/' or '@', and
+// the manifest need not end ".mpd" (a DASH endpoint may be "/dash/live"). Such a
+// value is not hex, so it cannot be mistaken for a ClearKey pair.
+func TestApplyDRMUserPassWidened(t *testing.T) {
+	rs := applyDRM(drmDetails{DrmType: "", DrmKey: "bob:p:a/ss@x", URL: "https://cdn.example/dash/live"})
+	if rs.DrmType != nil || rs.DrmK != nil {
+		t.Errorf("credentials produced DRM fields: type=%v k=%v", rs.DrmType, rs.DrmK)
+	}
+	if !strings.Contains(rs.URL, "@cdn.example") {
+		t.Errorf("URL = %q, want injected userinfo", rs.URL)
+	}
+	if strings.Contains(rs.URL, "p:a/ss@x") {
+		t.Errorf("URL = %q, want the password percent-encoded, not raw", rs.URL)
+	}
+}
+
+// The play path must classify an expired account by the same vocabulary as the
+// playlist endpoint: "Account expired." is a subscription state, not a generic
+// upstream error.
+func TestResolveExpiredAccountIsSubscriptionInactive(t *testing.T) {
+	adapter, srv := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+		writeErrorEnvelope(w, http.StatusForbidden, "Account expired. Please contact support or renew your plan.")
+	})
+
+	_, err := resolveTag(t, adapter, srv.URL, "ch-alpha")
+	if !errors.Is(err, ErrSubscriptionInactive) {
+		t.Fatalf("error = %v, want it to wrap ErrSubscriptionInactive", err)
+	}
+	if errors.Is(err, ErrUpstream) {
+		t.Errorf("expired account fell through to the generic upstream error: %v", err)
+	}
+}
+
+// Specific-first ordering: "Device not active" is a device problem; it must not
+// be captured by the "not active" subscription branch.
+func TestResolveDeviceNotActiveIsDevicePending(t *testing.T) {
+	adapter, srv := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+		writeErrorEnvelope(w, http.StatusForbidden, "Device not active")
+	})
+
+	_, err := resolveTag(t, adapter, srv.URL, "ch-alpha")
+	if !errors.Is(err, ErrDevicePending) {
+		t.Fatalf("error = %v, want it to wrap ErrDevicePending", err)
+	}
+	if errors.Is(err, ErrSubscriptionInactive) {
+		t.Errorf("device message misfiled as a subscription problem: %v", err)
+	}
+}

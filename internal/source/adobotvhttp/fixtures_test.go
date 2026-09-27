@@ -205,3 +205,10 @@ func unicodeEscape(s string) string {
 func envFrom(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
 }
+
+// roundTripFunc lets a test force a transport failure without touching the
+// network. http.Client.Do still wraps whatever it returns in a *url.Error that
+// embeds the full request URL, which is exactly the leak path under test.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

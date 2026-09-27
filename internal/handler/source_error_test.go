@@ -33,6 +33,7 @@ func TestSourceErrorStatus(t *testing.T) {
 		{"malformed envelope", fmt.Errorf("%w: not json", adobotvhttp.ErrMalformedEnvelope), http.StatusBadGateway, codeMalformedPlaylist},
 		{"malformed drm", fmt.Errorf("%w: not base64", adobotvhttp.ErrMalformedDRM), http.StatusBadGateway, codeMalformedDRM},
 		{"malformed vod library", fmt.Errorf("%w: not an array", adobotvhttp.ErrMalformedVODLibrary), http.StatusBadGateway, codeMalformedVODLibrary},
+		{"content token rejected", fmt.Errorf("%w: dead token", adobotvhttp.ErrTokenRejected), http.StatusBadGateway, codeTokenRejected},
 		{"upstream transport", fmt.Errorf("%w: connection refused", adobotvhttp.ErrUpstream), http.StatusBadGateway, codeUpstreamError},
 		{"unknown internal fault", errors.New("boom"), http.StatusInternalServerError, codeInternalError},
 	}

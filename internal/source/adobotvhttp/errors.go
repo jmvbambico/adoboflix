@@ -58,10 +58,57 @@ var (
 	// requested item carries no playable runtime_attr_url.
 	ErrContentNotFound = errors.New("adobotv-http: content not found in this playlist")
 
+	// ErrTokenRejected is returned when AdoboTV refuses a content token that the
+	// cached playlist envelope minted — a tokenized URL such as runtime_attr_url,
+	// the EPG URL or the VOD library URL. The token is minted per playlist fetch
+	// and can lapse; the adapter drops the cached envelope so the next call mints
+	// a fresh one, and this surfaces as its own actionable state rather than the
+	// generic upstream failure a dead token would otherwise look like.
+	ErrTokenRejected = errors.New("adobotv-http: content token rejected")
+
 	// ErrUpstream is the transport/status catch-all. Concrete gate failures
 	// above are preferred wherever the cause is known.
 	ErrUpstream = errors.New("adobotv-http: AdoboTV request failed")
 )
+
+// classifyGate maps an upstream refusal message onto the adapter's gate
+// sentinel, or nil when the message names no known gate. AdoboTV offers no
+// machine-readable code, so this is substring matching — but the checks are
+// ordered most-specific first: a message that names a device wins over the
+// subscription wording ("Device not active" is a device problem, not a lapsed
+// subscription), and a token rejection wins over the generic "expired" that a
+// token message often carries. The subscription branch admits the full
+// vocabulary AdoboTV uses interchangeably: expired, inactive, not active.
+//
+// Callers keep their own default when this returns nil: a rejected code at the
+// playlist endpoint, a generic upstream error everywhere else.
+func classifyGate(detail string) error {
+	lower := strings.ToLower(strings.TrimSpace(detail))
+	switch {
+	case strings.Contains(lower, "device"), strings.Contains(lower, "not approved"):
+		return devicePendingDetail(detail)
+	case strings.Contains(lower, "token"):
+		return tokenRejectedError(detail)
+	case strings.Contains(lower, "player"), strings.Contains(lower, "user-agent"), strings.Contains(lower, "user agent"):
+		return fmt.Errorf("%w: %s", ErrUserAgentRejected, detail)
+	case strings.Contains(lower, "expired"), strings.Contains(lower, "inactive"), strings.Contains(lower, "not active"):
+		return subscriptionInactiveError(detail)
+	default:
+		return nil
+	}
+}
+
+// tokenRejectedError explains a content-token rejection and what the adapter
+// already did about it: it is transient by construction, because the next call
+// discards the dead token with the cached envelope and mints a fresh one.
+func tokenRejectedError(detail string) error {
+	msg := "AdoboTV rejected the content token minted with this playlist. " +
+		"AdoboFlix has dropped the cached playlist and will fetch a fresh token on the next request."
+	if d := strings.TrimSpace(detail); d != "" {
+		msg += " (upstream said: " + d + ")"
+	}
+	return fmt.Errorf("%w: %s", ErrTokenRejected, msg)
+}
 
 // devicePendingDetail is the message an approved-required response carries. It
 // names the operator's queue as the next step, because "reconnect" will never
