@@ -40,7 +40,11 @@ func init() {
 	// postgres-direct is the only adapter that reads the schema directly, so it
 	// is the only one that declares a database requirement. main opens the
 	// connection for it and passes the handle in Config.DB.
-	source.Register(Name, source.Requirement{Database: true}, func(cfg source.Config) (source.Source, error) {
+	//
+	// Dev marks it as a harness the UI must not present as a normal option, and
+	// the omission of Selectable keeps it out of the choices entirely. It is
+	// reachable only through the ADOBOFLIX_SOURCE override.
+	source.Register(Name, source.Requirement{Database: true, Dev: true}, func(cfg source.Config) (source.Source, error) {
 		return New(cfg.DB)
 	})
 }

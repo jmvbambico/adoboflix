@@ -75,9 +75,16 @@ var (
 
 func init() {
 	// The source.Config database handle is intentionally ignored: this
-	// adapter has no database access by construction.
-	source.Register(Name, source.Requirement{}, func(source.Config) (source.Source, error) {
-		return NewFromEnv()
+	// adapter has no database access by construction. Config.FilePath is
+	// honoured — it is how the server points this adapter at a playlist the
+	// user imported rather than at ADOBOFLIX_FILE_PATH.
+	//
+	// PlaylistFile is declared so the server offers the import endpoints for
+	// this adapter and reports whether a playlist is configured for it, the
+	// same way adobotv-http declares PlaylistCode. Selectable marks it as one
+	// of the two end-user paths in AGENTS.md.
+	source.Register(Name, source.Requirement{PlaylistFile: true, Selectable: true}, func(cfg source.Config) (source.Source, error) {
+		return NewFromConfig(cfg)
 	})
 }
 

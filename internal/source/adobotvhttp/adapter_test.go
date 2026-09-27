@@ -16,6 +16,19 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
+// The subscriber path is one of the two user choices: Selectable, never Dev.
+func TestAdapterIsSelectableNotDev(t *testing.T) {
+	if !source.Selectable(Name) {
+		t.Errorf("Selectable(%q) = false, want true: it is an end-user path", Name)
+	}
+	if source.Dev(Name) {
+		t.Errorf("Dev(%q) = true, want false", Name)
+	}
+	if !source.NeedsPlaylistCode(Name) {
+		t.Errorf("NeedsPlaylistCode(%q) = false, want true", Name)
+	}
+}
+
 func TestNameAndOptionalCapabilities(t *testing.T) {
 	adapter, _ := newTestServer(t, time.Minute, libraryHandler(t, nil, standardDRM(), nil))
 

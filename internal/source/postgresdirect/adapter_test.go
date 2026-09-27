@@ -15,6 +15,17 @@ func TestRequiresDatabase(t *testing.T) {
 	}
 }
 
+// The harness is not a user's choice: it is marked Dev and never Selectable, so
+// the UI cannot offer it and only ADOBOFLIX_SOURCE reaches it.
+func TestHarnessIsDevAndNotSelectable(t *testing.T) {
+	if !source.Dev(Name) {
+		t.Errorf("Dev(%q) = false, want true", Name)
+	}
+	if source.Selectable(Name) {
+		t.Errorf("Selectable(%q) = true, want false: it must never be a normal option", Name)
+	}
+}
+
 // With no handle, Open fails with a clear error naming the adapter rather than
 // handing the factory a nil it would dereference.
 func TestOpenWithoutHandleFailsClearly(t *testing.T) {

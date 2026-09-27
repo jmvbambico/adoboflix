@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmvbambico/adoboflix/internal/source"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	"github.com/jmvbambico/adoboflix/internal/source/file"
 )
@@ -38,6 +39,21 @@ const (
 	// codePlaylistCodeNotSupported is returned by the playlist-code endpoint
 	// when the active source takes no playlist code at all.
 	codePlaylistCodeNotSupported = "playlist_code_not_supported"
+	// codeSourceNotConfigured is the "no source chosen yet" state. Every content
+	// route answers with it until the user picks one of the two real modes, so
+	// the client shows the choice rather than an empty library. It is distinct
+	// from playlist_code_required, which means a source is chosen and only its
+	// credential is missing.
+	codeSourceNotConfigured = "source_not_configured"
+	// codeSourcePinnedByEnv is returned by a mode-changing endpoint when
+	// ADOBOFLIX_SOURCE pins the source, so the UI cannot switch it.
+	codeSourcePinnedByEnv = "source_pinned_by_env"
+	// codeInvalidPlaylist is the import endpoint's rejection when the uploaded
+	// content does not parse as a playlist. Its "error" text names what failed.
+	codeInvalidPlaylist = "invalid_playlist"
+	// codePlaylistTooLarge is the import endpoint's rejection when the upload
+	// exceeds the request body cap.
+	codePlaylistTooLarge = "playlist_too_large"
 )
 
 // sourceErrorStatus maps an error returned by the active source to the HTTP
@@ -75,6 +91,12 @@ const (
 // option for now and is flagged in the change report.
 func sourceErrorStatus(err error) (int, string) {
 	switch {
+	case errors.Is(err, source.ErrNotConfigured):
+		// No source has been chosen yet. 409, in the same family as
+		// playlist_code_not_supported: the request conflicts with the current
+		// state and a human must pick a mode before it can succeed. Not a 5xx,
+		// which would look like our fault and invite retry churn.
+		return http.StatusConflict, codeSourceNotConfigured
 	case errors.Is(err, adobotvhttp.ErrDevicePending):
 		return http.StatusForbidden, codeDevicePending
 	case errors.Is(err, adobotvhttp.ErrSubscriptionInactive):
