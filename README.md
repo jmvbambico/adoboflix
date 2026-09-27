@@ -53,10 +53,16 @@ Configuration is via environment variables (`.env`, documented in
 |----------|---------|-------------|
 | `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required) |
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
-| `SERVER_HOST` | `0.0.0.0` | Bind address |
+| `SERVER_HOST` | `127.0.0.1` | Bind address |
 | `SERVER_PORT` | `5656` | Port |
 
 The CLI flags `--host` and `--port` override `SERVER_HOST` / `SERVER_PORT`.
+
+The bind address defaults to **loopback**. `/api/v1/proxy` is an
+unauthenticated fetcher and `/api/v1/resolve` returns the upstream CDN URL, so
+listening on every interface hands both to anything on the LAN. Set
+`SERVER_HOST=0.0.0.0` only when you mean to expose AdoboFlix, and read
+"Stream URL exposure" in `docs/source-adapters.md` before you do.
 
 ## Data source
 
