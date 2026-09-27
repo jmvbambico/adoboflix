@@ -1,6 +1,18 @@
 package source
 
-import "time"
+import (
+	"context"
+	"errors"
+	"time"
+)
+
+// ErrAccountInfoUnavailable is the "not available yet" answer an
+// AccountInfoProvider returns when it has no cached account facts to report.
+// Callers treat it as an empty answer, not a failure: they omit the account
+// fields and read again later. A cold cache is the normal state before the
+// library has fetched the playlist, so this is deliberately not an upstream
+// error and must not be surfaced as one.
+var ErrAccountInfoUnavailable = errors.New("account info is not available yet")
 
 // AccountInfoProvider is an OPTIONAL capability. A Source implements it when it
 // can describe the connected subscriber's account: the operator's own message,
@@ -13,13 +25,24 @@ import "time"
 // concept at all and does not implement this. It is deliberately not part of
 // Source, so those adapters are not forced to invent a tier or a plan label.
 //
+// # It is best-effort and must not block
+//
+// Callers use AccountInfo to decorate a status view, never to gate one, so an
+// implementation must be able to answer without waiting on upstream: it reports
+// from an already-warm cache and returns ErrAccountInfoUnavailable when that
+// cache is cold, rather than triggering a fetch. That keeps a status read from
+// stalling on a slow or unreachable upstream. It also honours its context, so a
+// caller that has gone away is not kept waiting.
+//
 // Callers must type-assert for this capability and omit the account facts
-// plainly when it is absent.
+// plainly when it is absent or unavailable.
 type AccountInfoProvider interface {
-	// AccountInfo reports what upstream says about the connected account. A
-	// zero AccountInfo is a valid answer: it means upstream supplied neither a
-	// message nor an expiry. It is read-only.
-	AccountInfo() (AccountInfo, error)
+	// AccountInfo reports what upstream says about the connected account,
+	// answering from an already-warm cache and never triggering a fetch. It
+	// returns ErrAccountInfoUnavailable when there is nothing cached yet, and
+	// returns the context's error (rather than doing work) when ctx is already
+	// cancelled or past its deadline. It is read-only.
+	AccountInfo(ctx context.Context) (AccountInfo, error)
 }
 
 // AccountInfo is what an adapter can truthfully report about the connected

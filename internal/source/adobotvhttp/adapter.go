@@ -558,19 +558,28 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 // --- account (optional capability) ------------------------------------------
 
 // AccountInfo reports the account facts the playlist envelope carries: the
-// operator's user_message and the subscription's billing expiry. It reads the
-// same cached envelope every other call uses, so it costs no extra upstream
-// request when the cache is warm.
+// operator's user_message and the subscription's billing expiry.
+//
+// It is cache-only: it reads the envelope only when it is already warm and
+// never triggers a fetch. /api/v1/source/status calls this to decorate its
+// response, and that endpoint must stay fast, so a cold cache reports
+// ErrAccountInfoUnavailable and the facts appear on a later poll once the
+// library has fetched the envelope — which a normal app load does anyway.
+// Making status wait on upstream here would let an unreachable AdoboTV stall
+// the account UI for the client's whole 30s timeout.
 //
 // billed_till is a string of unix seconds upstream and is absent for
 // non-subscription tiers, so a missing value is the normal case, not an error.
 // A value that is present but not a unix-seconds integer is treated as absent
 // rather than failing the whole call, so a malformed expiry cannot hide a
 // perfectly good user_message.
-func (a *Adapter) AccountInfo() (source.AccountInfo, error) {
-	env, err := a.library(context.Background())
-	if err != nil {
+func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
+	if err := ctx.Err(); err != nil {
 		return source.AccountInfo{}, err
+	}
+	env := a.cachedEnvelope()
+	if env == nil {
+		return source.AccountInfo{}, source.ErrAccountInfoUnavailable
 	}
 	info := source.AccountInfo{UserMessage: strings.TrimSpace(env.Provider.UserMessage)}
 	if raw := strings.TrimSpace(env.Provider.BilledTill); raw != "" {

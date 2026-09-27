@@ -1,11 +1,15 @@
 package adobotvhttp
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
 // accountEnvelope renders a playlist envelope whose provider block carries the
@@ -33,13 +37,23 @@ func accountEnvelope(t *testing.T, r *http.Request, billedTill any) string {
 	return string(body)
 }
 
+// warmEnvelope fetches the envelope through the normal read path so the
+// adapter's cache holds it. AccountInfo answers only from that cache.
+func warmEnvelope(t *testing.T, adapter *Adapter) {
+	t.Helper()
+	if _, _, err := adapter.ListChannels("", 1, 0); err != nil {
+		t.Fatalf("warm the envelope cache: %v", err)
+	}
+}
+
 // A subscription tier reports its billing expiry and the operator's message.
 func TestAccountInfoReportsExpiryAndMessage(t *testing.T) {
 	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "1893456000"))
 	})
+	warmEnvelope(t, adapter)
 
-	info, err := adapter.AccountInfo()
+	info, err := adapter.AccountInfo(context.Background())
 	if err != nil {
 		t.Fatalf("AccountInfo: %v", err)
 	}
@@ -58,8 +72,9 @@ func TestAccountInfoOmitsAbsentExpiry(t *testing.T) {
 	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, nil))
 	})
+	warmEnvelope(t, adapter)
 
-	info, err := adapter.AccountInfo()
+	info, err := adapter.AccountInfo(context.Background())
 	if err != nil {
 		t.Fatalf("AccountInfo: %v", err)
 	}
@@ -77,8 +92,9 @@ func TestAccountInfoIgnoresUnparseableExpiry(t *testing.T) {
 	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "not-a-timestamp"))
 	})
+	warmEnvelope(t, adapter)
 
-	info, err := adapter.AccountInfo()
+	info, err := adapter.AccountInfo(context.Background())
 	if err != nil {
 		t.Fatalf("AccountInfo: %v", err)
 	}
@@ -90,18 +106,51 @@ func TestAccountInfoIgnoresUnparseableExpiry(t *testing.T) {
 	}
 }
 
-// A refused playlist surfaces its own gate error; the caller omits the account
-// facts rather than reporting a false account state.
-func TestAccountInfoPropagatesFetchError(t *testing.T) {
+// The whole point of the cache-only contract: on a cold cache AccountInfo
+// reports "not available yet" and does NOT reach upstream. This is what keeps
+// /api/v1/source/status from stalling on a slow or unreachable AdoboTV.
+func TestAccountInfoDoesNotFetchOnAColdCache(t *testing.T) {
+	var hits atomic.Int32
 	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
-		writeErrorEnvelope(w, http.StatusForbidden, "Invalid playlist code or account status")
+		hits.Add(1)
+		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "1893456000"))
 	})
 
-	info, err := adapter.AccountInfo()
-	if !errors.Is(err, ErrPlaylistRejected) {
-		t.Fatalf("AccountInfo error = %v, want it to wrap ErrPlaylistRejected", err)
+	// Deliberately do not warm the cache.
+	start := time.Now()
+	info, err := adapter.AccountInfo(context.Background())
+
+	if !errors.Is(err, source.ErrAccountInfoUnavailable) {
+		t.Fatalf("AccountInfo on a cold cache = %v, want ErrAccountInfoUnavailable", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("AccountInfo reached upstream %d time(s) on a cold cache; it must not fetch", got)
 	}
 	if info.SubscriptionExpiresAt != nil || info.UserMessage != "" {
-		t.Errorf("AccountInfo = %+v, want the zero value alongside the error", info)
+		t.Errorf("AccountInfo = %+v, want the zero value", info)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("AccountInfo took %v on a cold cache; it must answer immediately", elapsed)
+	}
+}
+
+// A caller that has gone away must not be kept waiting: a cancelled context is
+// returned before any work, and never reaches upstream.
+func TestAccountInfoHonoursCancelledContext(t *testing.T) {
+	var hits atomic.Int32
+	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "1893156000"))
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := adapter.AccountInfo(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("AccountInfo with a cancelled context = %v, want context.Canceled", err)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Errorf("AccountInfo reached upstream %d time(s) with a cancelled context", got)
 	}
 }
