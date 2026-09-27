@@ -7,6 +7,18 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    // The Go server serves ./static (r.Static("/assets", "./static/assets") and
+    // StaticFile("/", "./static/index.html")). Build straight into it so
+    // `npm run build` is the whole deploy step. Without this, Vite wrote to
+    // client/dist and nothing copied it to static/, so every client change
+    // since the last manual copy was invisible to the running app.
+    build: {
+      outDir: '../static',
+      // outDir is outside the project root, where Vite refuses to empty by
+      // default; opt in explicitly so stale bundles do not linger. static/ is
+      // fully reproducible from this build plus client/public/.
+      emptyOutDir: true,
+    },
     test: {
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
