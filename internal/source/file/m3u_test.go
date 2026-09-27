@@ -360,6 +360,145 @@ func TestM3UEpisodeWithNoTrailingTextKeepsFullTitle(t *testing.T) {
 	}
 }
 
+// Two different shows whose titles carry no series prefix sit in one group; the
+// tvg-name attribute is what tells them apart, and it must be preferred over
+// the group fallback that would otherwise merge them. Case/whitespace variants
+// of one tvg-name still merge.
+func TestM3USeriesIdentityUsesTvgNameOverGroup(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 tvg-name=\"The Office US\" group-title=\"Series\",1x02 - The Dundies\nhttps://cdn.example/office1.mkv\n"+
+		"#EXTINF:-1 tvg-name=\"the  office us\" group-title=\"series\",1x05 - Basketball\nhttps://cdn.example/office2.mkv\n"+
+		"#EXTINF:-1 tvg-name=\"Fawlty Towers\" group-title=\"Series\",1x03 - The Wedding\nhttps://cdn.example/fawlty1.mkv\n")
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("series = %d, want 2 (two shows, not one merged %q)", total, "Series")
+	}
+	if want := []string{"Fawlty Towers", "The Office US"}; !reflect.DeepEqual(entryNames(entries), want) {
+		t.Fatalf("series = %v, want %v", entryNames(entries), want)
+	}
+
+	office, found := findEntry(entries, "The Office US")
+	if !found {
+		t.Fatalf("no series named %q; entries = %v", "The Office US", entryNames(entries))
+	}
+	officeEpisodes, err := adapter.GetEpisodes(office.ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(officeEpisodes) != 2 {
+		t.Errorf("The Office US episodes = %d, want 2 (case/whitespace variants merge)", len(officeEpisodes))
+	}
+	if got := episodeNameByNumber(officeEpisodes); !reflect.DeepEqual(got, map[string]string{"1x2": "The Dundies", "1x5": "Basketball"}) {
+		t.Errorf("The Office US episodes = %v", got)
+	}
+
+	fawlty, found := findEntry(entries, "Fawlty Towers")
+	if !found {
+		t.Fatalf("no series named %q; entries = %v", "Fawlty Towers", entryNames(entries))
+	}
+	fawltyEpisodes, err := adapter.GetEpisodes(fawlty.ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(fawltyEpisodes) != 1 || fawltyEpisodes[0].Name != "The Wedding" {
+		t.Errorf("Fawlty Towers episodes = %+v, want one named The Wedding", fawltyEpisodes)
+	}
+
+	if adapter.summary.seriesFromTvgName != 2 || adapter.summary.seriesFromTitle != 0 || adapter.summary.seriesFromGroup != 0 {
+		t.Errorf("identity = title %d / tvg-name %d / group %d, want 0/2/0",
+			adapter.summary.seriesFromTitle, adapter.summary.seriesFromTvgName, adapter.summary.seriesFromGroup)
+	}
+}
+
+// A tvg-name that is really the entry name ("Breaking Bad S01E01") must not
+// invent one series per episode: the same marker split is applied, so both
+// episodes reduce to the one series "Breaking Bad".
+func TestM3UTvgNameCarryingMarkerDoesNotSplitSeries(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 tvg-name=\"Breaking Bad S01E01\" group-title=\"Series\",1x01 - Pilot\nhttps://cdn.example/bb1.mkv\n"+
+		"#EXTINF:-1 tvg-name=\"Breaking Bad S01E02\" group-title=\"Series\",1x02 - Cat's in the Bag\nhttps://cdn.example/bb2.mkv\n")
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("series = %d, want 1 (a marker-carrying tvg-name must not split the show)", total)
+	}
+	if entries[0].Name != "Breaking Bad" {
+		t.Errorf("series name = %q, want %q", entries[0].Name, "Breaking Bad")
+	}
+	episodes, err := adapter.GetEpisodes(entries[0].ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Errorf("episodes = %d, want 2", len(episodes))
+	}
+	if adapter.summary.seriesFromTvgName != 1 {
+		t.Errorf("identity from tvg-name = %d, want 1", adapter.summary.seriesFromTvgName)
+	}
+}
+
+// A tvg-name that reduces to nothing usable — a bare "S01E01", or whitespace —
+// falls all the way back to the group name rather than creating a nameless or
+// per-episode series.
+func TestM3UTvgNameReducingToEmptyFallsBackToGroup(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 tvg-name=\"S01E01\" group-title=\"Series\",1x01 - Pilot\nhttps://cdn.example/a.mkv\n"+
+		"#EXTINF:-1 tvg-name=\"   \" group-title=\"Series\",1x02 - Second\nhttps://cdn.example/b.mkv\n")
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("series = %d, want 1", total)
+	}
+	if entries[0].Name != "Series" {
+		t.Errorf("series name = %q, want the group name %q", entries[0].Name, "Series")
+	}
+	if adapter.summary.seriesFromGroup != 1 || adapter.summary.seriesFromTvgName != 0 {
+		t.Errorf("identity = tvg-name %d / group %d, want 0/1",
+			adapter.summary.seriesFromTvgName, adapter.summary.seriesFromGroup)
+	}
+}
+
+// A title that carries a series prefix wins over a conflicting tvg-name.
+func TestM3UTitlePrefixBeatsTvgName(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 tvg-name=\"The Office US\" group-title=\"Series\",Breaking Bad S01E01 - Pilot\nhttps://cdn.example/bb.mkv\n")
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("series = %d, want 1", total)
+	}
+	if entries[0].Name != "Breaking Bad" {
+		t.Errorf("series name = %q, want the title prefix %q", entries[0].Name, "Breaking Bad")
+	}
+	if adapter.summary.seriesFromTitle != 1 || adapter.summary.seriesFromTvgName != 0 {
+		t.Errorf("identity = title %d / tvg-name %d, want 1/0",
+			adapter.summary.seriesFromTitle, adapter.summary.seriesFromTvgName)
+	}
+}
+
+// episodeNameByNumber maps "SxE" to the episode's name, for order-insensitive
+// assertions.
+func episodeNameByNumber(episodes []source.Episode) map[string]string {
+	out := make(map[string]string, len(episodes))
+	for _, ep := range episodes {
+		out[strconv.Itoa(ep.SeasonNumber)+"x"+strconv.Itoa(ep.EpisodeNumber)] = ep.Name
+	}
+	return out
+}
+
 func TestM3UClassificationSummary(t *testing.T) {
 	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
 		"#EXTINF:-1 group-title=\"News\",News One\nhttps://cdn.example/news.m3u8\n"+
@@ -411,14 +550,15 @@ func TestM3UClassificationSummary(t *testing.T) {
 
 	// The startup summary is one line per category and names the VOD groups.
 	lines := got.logLines("/tmp/playlist.m3u")
-	if len(lines) != 5 {
-		t.Fatalf("summary has %d lines, want 5:\n%s", len(lines), strings.Join(lines, "\n"))
+	if len(lines) != 6 {
+		t.Fatalf("summary has %d lines, want 6:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	joined := strings.Join(lines, "\n")
 	for _, want := range []string{
 		"read 4 entries from /tmp/playlist.m3u",
 		"1 live channels",
 		"3 VOD rows across 1 series",
+		"series identity: 1 from title, 0 from tvg-name, 0 from group name",
 		"1 VOD titles had no parseable season/episode",
 		("VOD group names: MOVIES, TV Shows"),
 	} {

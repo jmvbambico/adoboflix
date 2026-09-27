@@ -87,6 +87,13 @@ type m3uSummary struct {
 	series    int      // distinct series VOD entries
 	movies    int      // VOD rows with no parseable season/episode
 	vodGroups []string // group names treated as VOD, deduped and sorted
+
+	// Where each distinct series got its identity from. The group fallback is
+	// the number that tells a user their playlist lacks the metadata to group
+	// reliably.
+	seriesFromTitle   int
+	seriesFromTvgName int
+	seriesFromGroup   int
 }
 
 // logLines renders the summary as the few lines the server logs at startup.
@@ -100,6 +107,8 @@ func (s *m3uSummary) logLines(path string) []string {
 			s.entries, path, s.dropped+s.bareURLs, s.dropped, s.bareURLs),
 		fmt.Sprintf("[source] m3u: %d live channels", s.channels),
 		fmt.Sprintf("[source] m3u: %d VOD rows across %d series", s.vodRows, s.series),
+		fmt.Sprintf("[source] m3u: series identity: %d from title, %d from tvg-name, %d from group name",
+			s.seriesFromTitle, s.seriesFromTvgName, s.seriesFromGroup),
 		fmt.Sprintf("[source] m3u: %d VOD titles had no parseable season/episode (filed as movies)", s.movies),
 		fmt.Sprintf("[source] m3u: VOD group names: %s", groups),
 	}
@@ -352,6 +361,45 @@ func splitSeriesTitle(title string) (seriesName, episodeTitle string) {
 	return strings.TrimSpace(title), ""
 }
 
+// identitySource records where a series got its name from, so the startup
+// summary can report how often the playlist gave no usable series identity.
+type identitySource int
+
+const (
+	identityFromTitle identitySource = iota
+	identityFromTvgName
+	identityFromGroup
+)
+
+// seriesIdentity picks a series name for a titled episode, in order of
+// preference:
+//
+//  1. the text before the marker in the title, when there is any;
+//  2. the `tvg-name` attribute, when it is present and reduces to a non-empty
+//     name;
+//  3. the group name.
+//
+// The same marker split is applied to `tvg-name`, because in real playlists it
+// is often the entry name — the whole "Breaking Bad S01E01", or the episode
+// title — rather than the series. Splitting keeps a marker-carrying `tvg-name`
+// from inventing one series per episode, and a `tvg-name` that reduces to empty
+// (a bare "S01E01") falls through to the group rather than creating a nameless
+// series.
+//
+// The returned name is only trimmed here; the caller normalises it for the
+// series key, so casing and spacing variants of one show still merge.
+func seriesIdentity(e m3uEntry, group string) (string, identitySource) {
+	if before, _ := splitSeriesTitle(e.title); before != "" {
+		return before, identityFromTitle
+	}
+	if tvgName := strings.TrimSpace(e.attrs["tvg-name"]); tvgName != "" {
+		if before, _ := splitSeriesTitle(tvgName); before != "" {
+			return before, identityFromTvgName
+		}
+	}
+	return group, identityFromGroup
+}
+
 // --- construction -----------------------------------------------------------
 
 // buildM3ULibrary turns parsed entries into the same libraryFile the JSON
@@ -423,10 +471,11 @@ func buildM3ULibrary(entries []m3uEntry, summary *m3uSummary) libraryFile {
 			continue
 		}
 
-		name, episodeName := splitSeriesTitle(e.title)
-		if name == "" {
-			name = group
-		}
+		// Identity comes from the title when it has a prefix, else tvg-name,
+		// else the group; the episode title is always the title's trailing
+		// text, never tvg-name.
+		name, idSrc := seriesIdentity(e, group)
+		_, episodeName := splitSeriesTitle(e.title)
 		if episodeName == "" {
 			// The marker ended the title, so it carries no episode title of its
 			// own; fall back to the full title rather than leaving it blank.
@@ -451,6 +500,14 @@ func buildM3ULibrary(entries []m3uEntry, summary *m3uSummary) libraryFile {
 			idx = len(file.Entries) - 1
 			seriesAt[key] = idx
 			summary.series++
+			switch idSrc {
+			case identityFromTitle:
+				summary.seriesFromTitle++
+			case identityFromTvgName:
+				summary.seriesFromTvgName++
+			case identityFromGroup:
+				summary.seriesFromGroup++
+			}
 		}
 		streamURL := e.url
 		file.Episodes = append(file.Episodes, source.Episode{

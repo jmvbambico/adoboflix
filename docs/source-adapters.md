@@ -569,10 +569,23 @@ All are matched case-insensitively (`s01e02`, `SEASON 1 EPISODE 2`), and
 - A VOD-classified entry whose title has **no** parseable season/episode is
   still a VOD row, filed as a `Movie` with a single default `vod_stream` — it is
   never dropped just because the title could not be parsed.
-- When the marker sits at the very start (`1x02 - Pilot`) there is no series
-  name in the title, so the group name is used instead. That case, and a
-  series-name collision between two different shows, is the remaining guesswork —
-  the summary log is what makes it visible.
+
+When the title carries no series prefix (`1x02 - The Dundies`), the series name
+comes from elsewhere, in this order:
+
+1. the text before the marker in the title (the case above — it wins);
+2. the `tvg-name` attribute, when it is present and reduces to a non-empty name;
+3. the group name, as a last resort.
+
+`tvg-name` is often the *entry* name rather than the series — the whole
+`Breaking Bad S01E01`, or the episode title — so the same marker split is
+applied to it: a `tvg-name` of `Breaking Bad S01E01` reduces to `Breaking Bad`,
+and a `tvg-name` that is only a marker (`S01E01`) reduces to nothing and falls
+through to the group. That is what tells two prefixless shows sharing one group
+— `The Office US` and `Fawlty Towers`, each in `group-title="Series"` — apart,
+while keeping a marker-carrying `tvg-name` from splitting one show into one
+entry per episode. Series names are compared case- and whitespace-insensitively,
+so `The Office US` and `the  office us` are one series.
 
 #### What the startup summary reports
 
@@ -583,15 +596,42 @@ line per category, when the server boots:
 [source] m3u: read 1234 entries from /path/playlist.m3u (dropped 6: 5 #EXTINF without a URL, 1 bare URLs without #EXTINF)
 [source] m3u: 1180 live channels
 [source] m3u: 49 VOD rows across 8 series
+[source] m3u: series identity: 5 from title, 2 from tvg-name, 3 from group name
 [source] m3u: 12 VOD titles had no parseable season/episode (filed as movies)
 [source] m3u: VOD group names: Movies, Series, TV Shows
 ```
 
 Read top to bottom: entries read and dropped, how many became channels, how many
-became VOD and across how many series, how many VOD titles had no
-season/episode (filed as movies), and which group names were treated as VOD. A
-film missing from the VOD list was almost certainly counted as a channel here. A
-JSON playlist has no inference to report and logs none of this.
+became VOD and across how many series, where each series got its identity, how
+many VOD titles had no season/episode (filed as movies), and which group names
+were treated as VOD. A film missing from the VOD list was almost certainly
+counted as a channel here. The **from group name** count is the one that tells a
+user their playlist lacks the metadata to group reliably: every series counted
+there was named after its group, so two different prefixless shows in one group
+will have been merged under that group's name. A JSON playlist has no inference
+to report and logs none of this.
+
+#### Known limits
+
+The mapping is a heuristic and three things are known to be lossy. None is a bug
+to file:
+
+- **Two shows with the same name and no distinguishing metadata cannot be
+  separated.** If both the title and `tvg-name` say only `The Office`, a US and a
+  UK run in one group become one series. No heuristic can fix this; it needs
+  better metadata in the playlist.
+- **A film whose group does not contain one of the VOD keywords becomes a live
+  channel**, and so does a series grouped under a word like `Documentaries`. The
+  word list is English-only, so a `Películas` or `Séries` group falls through
+  too. The startup summary's channel count and VOD-group list are how you spot
+  it.
+- **Prefixless titles with no usable `tvg-name` fall back to the group name**,
+  so distinct shows in one group merge. The summary's `from group name` count
+  measures how often this happened.
+
+Widening the keyword list or letting configuration declare the mapping would
+help the second and third, but both are the owner's decision, not the adapter's
+— the log and this section are the visibility the current design offers.
 
 ### Capabilities
 
