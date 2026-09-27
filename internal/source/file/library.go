@@ -46,12 +46,25 @@ type library struct {
 
 // parseLibrary decodes the documented JSON envelope into an indexed library.
 //
-// It normalises the filterable values once, here, so the value an adapter
-// advertises and the value its filter accepts are always the same string (see
-// normalizeOptional and distinctValues). It derives a stable id for any item
-// whose id is absent, and drops a later row that duplicates an earlier
-// *provided* id, so a lookup and a listing can never disagree about which item
-// an id names.
+// Ids are assigned in two passes. The first reserves every id the file spells
+// out; the second derives ids only for the rows that have none, drawing from
+// outside that reserved set. So an explicit id always wins over a derived one
+// wherever it sits in the file, and a derived id can never take an id the file
+// meant for another row.
+//
+// Values are normalised once, here, so the value an adapter advertises and the
+// value its filter accepts are always the same string (see normalizeOptional
+// and distinctValues). Ids and the channel_id/vod_id references are trimmed for
+// the same reason.
+//
+// A row whose own id is missing gets a derived one; a derived id that would
+// collide with another derived id gets a deterministic numeric suffix, so a
+// distinct row is never discarded. A row that repeats an id the file already
+// gave an earlier row of the same kind is ambiguous, and is skipped for
+// channels, entries and episodes. Streams and vod_streams are the exception:
+// their rows are always kept, because two rows under one channel are separate
+// streams and no interface method looks a stream up by id. Their derived ids
+// still avoid every id the file provides.
 func parseLibrary(data []byte) (*library, error) {
 	var file libraryFile
 	if err := json.Unmarshal(data, &file); err != nil {
@@ -67,22 +80,25 @@ func parseLibrary(data []byte) (*library, error) {
 		episodesByVod:    make(map[string][]source.Episode, len(file.Entries)),
 	}
 
-	// usedStreamIDs tracks derived stream ids so a second stream whose
-	// identity fields were omitted is kept under a suffixed id rather than
-	// silently sharing the first's.
-	usedStreamIDs := make(map[string]struct{}, len(file.Streams))
-	usedVodStreamIDs := make(map[string]struct{}, len(file.VodStreams))
+	// Pass 1: every id the file spells out is reserved before any id is
+	// derived, so a derived id can never collide with an explicit one however
+	// the rows are ordered.
+	channelIDs := collectIDs(file.Channels, func(c source.Channel) string { return c.ID })
+	entryIDs := collectIDs(file.Entries, func(e source.Entry) string { return e.ID })
+	episodeIDs := collectIDs(file.Episodes, func(e source.Episode) string { return e.ID })
+	streamIDs := collectIDs(file.Streams, func(s source.Stream) string { return s.ID })
+	vodStreamIDs := collectIDs(file.VodStreams, func(s source.VodStream) string { return s.ID })
 
 	for i := range file.Channels {
 		ch := file.Channels[i]
 		ch.Category = normalizeOptional(ch.Category)
-		if strings.TrimSpace(ch.ID) == "" {
-			ch.ID = uniqueDerivedID(derivedChannelID(ch), func(id string) bool {
-				_, ok := lib.channelsByID[id]
-				return ok
-			})
-		} else if _, dup := lib.channelsByID[ch.ID]; dup {
-			continue
+		if id := strings.TrimSpace(ch.ID); id != "" {
+			ch.ID = id
+			if _, dup := lib.channelsByID[id]; dup {
+				continue
+			}
+		} else {
+			ch.ID = channelIDs.claim(derivedChannelID(ch))
 		}
 		lib.channels = append(lib.channels, ch)
 		lib.channelsByID[ch.ID] = ch
@@ -93,13 +109,13 @@ func parseLibrary(data []byte) (*library, error) {
 		e.Category = normalizeOptional(e.Category)
 		e.SourceType = strings.TrimSpace(e.SourceType)
 		e.Type = strings.TrimSpace(e.Type)
-		if strings.TrimSpace(e.ID) == "" {
-			e.ID = uniqueDerivedID(derivedEntryID(e), func(id string) bool {
-				_, ok := lib.entriesByID[id]
-				return ok
-			})
-		} else if _, dup := lib.entriesByID[e.ID]; dup {
-			continue
+		if id := strings.TrimSpace(e.ID); id != "" {
+			e.ID = id
+			if _, dup := lib.entriesByID[id]; dup {
+				continue
+			}
+		} else {
+			e.ID = entryIDs.claim(derivedEntryID(e))
 		}
 		lib.entries = append(lib.entries, e)
 		lib.entriesByID[e.ID] = e
@@ -107,13 +123,14 @@ func parseLibrary(data []byte) (*library, error) {
 
 	for i := range file.Episodes {
 		ep := file.Episodes[i]
-		if strings.TrimSpace(ep.ID) == "" {
-			ep.ID = uniqueDerivedID(derivedEpisodeID(ep), func(id string) bool {
-				_, ok := lib.episodesByID[id]
-				return ok
-			})
-		} else if _, dup := lib.episodesByID[ep.ID]; dup {
-			continue
+		ep.VodID = strings.TrimSpace(ep.VodID)
+		if id := strings.TrimSpace(ep.ID); id != "" {
+			ep.ID = id
+			if _, dup := lib.episodesByID[id]; dup {
+				continue
+			}
+		} else {
+			ep.ID = episodeIDs.claim(derivedEpisodeID(ep))
 		}
 		lib.episodesByID[ep.ID] = ep
 		lib.episodesByVod[ep.VodID] = append(lib.episodesByVod[ep.VodID], ep)
@@ -121,24 +138,22 @@ func parseLibrary(data []byte) (*library, error) {
 
 	for i := range file.Streams {
 		s := file.Streams[i]
-		if strings.TrimSpace(s.ID) == "" {
-			s.ID = uniqueDerivedID(derivedStreamID(s), func(id string) bool {
-				_, ok := usedStreamIDs[id]
-				return ok
-			})
-			usedStreamIDs[s.ID] = struct{}{}
+		s.ChannelID = strings.TrimSpace(s.ChannelID)
+		if id := strings.TrimSpace(s.ID); id != "" {
+			s.ID = id
+		} else {
+			s.ID = streamIDs.claim(derivedStreamID(s))
 		}
 		lib.streamsByChannel[s.ChannelID] = append(lib.streamsByChannel[s.ChannelID], s)
 	}
 
 	for i := range file.VodStreams {
 		s := file.VodStreams[i]
-		if strings.TrimSpace(s.ID) == "" {
-			s.ID = uniqueDerivedID(derivedVodStreamID(s), func(id string) bool {
-				_, ok := usedVodStreamIDs[id]
-				return ok
-			})
-			usedVodStreamIDs[s.ID] = struct{}{}
+		s.VodID = strings.TrimSpace(s.VodID)
+		if id := strings.TrimSpace(s.ID); id != "" {
+			s.ID = id
+		} else {
+			s.ID = vodStreamIDs.claim(derivedVodStreamID(s))
 		}
 		lib.vodStreamsByVod[s.VodID] = append(lib.vodStreamsByVod[s.VodID], s)
 	}
@@ -201,20 +216,44 @@ func distinctValues(values []string) []string {
 	return out
 }
 
-// uniqueDerivedID returns base, or base with a numeric suffix when base is
-// already taken. It keeps two genuinely distinct rows that happen to derive the
-// same id — because the fields the derivation reads were omitted — instead of
-// letting parseLibrary drop the second as a duplicate. The suffix follows file
-// order, so it is deterministic across reloads of the same file.
-func uniqueDerivedID(base string, used func(string) bool) string {
-	if !used(base) {
+// idSet is the set of ids one kind of row has claimed: every id the file
+// spells out for that kind, plus every derived id already handed out. It is
+// seeded with the file's own ids before any derivation, so a derived id can
+// never take an explicit one.
+type idSet map[string]struct{}
+
+// collectIDs reserves every non-empty id the rows provide, trimmed.
+func collectIDs[T any](rows []T, id func(T) string) idSet {
+	set := make(idSet, len(rows))
+	for _, row := range rows {
+		if v := strings.TrimSpace(id(row)); v != "" {
+			set[v] = struct{}{}
+		}
+	}
+	return set
+}
+
+// claim returns base if it is free, otherwise base with the first free numeric
+// suffix, and records the result. It keeps two genuinely distinct rows that
+// derive the same id — because the fields the derivation reads were omitted —
+// instead of dropping one as a duplicate. The suffix follows file order, so it
+// is deterministic across reloads of the same file.
+func (s idSet) claim(base string) string {
+	if _, used := s[base]; !used {
+		s[base] = struct{}{}
 		return base
 	}
 	for n := 2; ; n++ {
-		if candidate := base + "-" + strconv.Itoa(n); !used(candidate) {
+		if candidate := base + "-" + strconv.Itoa(n); !s.has(candidate) {
+			s[candidate] = struct{}{}
 			return candidate
 		}
 	}
+}
+
+func (s idSet) has(id string) bool {
+	_, ok := s[id]
+	return ok
 }
 
 // --- deterministic ordering ------------------------------------------------

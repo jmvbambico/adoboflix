@@ -408,7 +408,9 @@ Rules worth stating, because they are choices rather than accidents:
 - **Values are compared as trimmed text.** A category written `" Films "` is
   exposed *and filtered* as `Films`, and genres, providers and channel
   categories are listed once per case-insensitive value — so the list never
-  advertises something the filter would fail to match.
+  advertises something the filter would fail to match. Ids and the
+  `channel_id`/`vod_id` references are trimmed the same way, so
+  `"  ch-padded  "` is looked up (and listed) as `ch-padded`.
 
 ### How ids are derived
 
@@ -434,11 +436,20 @@ Hashing only the numbers would give every such episode the same id and the
 loader would drop all but the first. Including enough identity keeps rows that
 genuinely differ apart.
 
-When two distinct rows still derive the same id — they are identical in every
-field the derivation reads — the adapter suffixes the second (`…-2`, `…-3`)
-rather than dropping it, following file order so the suffix is stable across
-reloads. Rows whose ids are *given* in the file and repeat are a malformed
-file, and the later one is still skipped as ambiguous.
+Ids are assigned in **two passes**, so file order never changes which rows
+exist: every id the file spells out is reserved first, and a derived id is
+drawn from outside that set. An explicit id therefore always wins over a
+derived one, wherever the two sit relative to each other. A derived id that
+would still collide with another derived id (the two rows are identical in
+every field the derivation reads) is suffixed (`…-2`, `…-3`), following file
+order so it stays stable across reloads, rather than dropping a genuinely
+distinct row.
+
+A row that repeats an id the file has already given an earlier row of the same
+kind is ambiguous: for channels, entries and episodes the later one is skipped.
+Streams and `vod_streams` are the exception — every row is kept, because two
+rows under one channel are two streams and nothing looks a stream up by id.
+Their derived ids still avoid every id the file provides.
 
 Derivation only helps **top-level** items, because a child references its
 parent by an id the file spells out. A derived parent id cannot be referenced,

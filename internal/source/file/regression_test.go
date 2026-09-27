@@ -2,7 +2,10 @@ package file
 
 import (
 	"reflect"
+	"sort"
 	"testing"
+
+	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
 func mustRawAdapter(t *testing.T, contents string) *Adapter {
@@ -277,4 +280,179 @@ func TestVodStreamsRankOnlineFirst(t *testing.T) {
 	if len(streams) != 2 || streams[0].ID != "b-online" {
 		t.Fatalf("vod stream order = %+v, want the online stream first", streams)
 	}
+}
+
+// BLOCKING 1 (delta): file-provided stream ids are reserved, so a derived id
+// can never take one. The second row derives exactly the id the first row
+// spells out; it must be given a different one instead.
+func TestDerivedStreamIDDoesNotTakeProvidedStreamID(t *testing.T) {
+	const streamURL = "https://cdn.example/live1.m3u8"
+	explicit := derivedStreamID(source.Stream{ChannelID: "c1", Label: "Main", URL: streamURL})
+
+	adapter := mustRawAdapter(t, `{
+	  "channels": [{"id": "c1", "name": "Live Channel", "status": "active"}],
+	  "streams": [
+	    {"id": "`+explicit+`", "channel_id": "c1", "label": "Main", "url": "`+streamURL+`"},
+	    {"channel_id": "c1", "label": "Main", "url": "`+streamURL+`"}
+	  ]
+	}`)
+
+	_, streams, err := adapter.GetChannelWithStreams("c1")
+	if err != nil {
+		t.Fatalf("GetChannelWithStreams: %v", err)
+	}
+	if len(streams) != 2 {
+		t.Fatalf("streams = %d, want 2", len(streams))
+	}
+	if streams[0].ID == streams[1].ID {
+		t.Fatalf("a derived id took the provided id %q; both streams share it", explicit)
+	}
+	remaining := false
+	for _, s := range streams {
+		if s.ID == explicit {
+			remaining = true
+		}
+	}
+	if !remaining {
+		t.Errorf("the file-provided id %q was not preserved on its own row", explicit)
+	}
+}
+
+// The deliberate decision the parseLibrary doc states: stream rows are never
+// deduplicated, even when the file reuses an id, because no interface method
+// looks a stream up by id and two rows under a channel are two streams.
+func TestDuplicateProvidedStreamIDsAreKept(t *testing.T) {
+	adapter := mustRawAdapter(t, `{
+	  "channels": [{"id": "c1", "name": "C", "status": "active"}],
+	  "streams": [
+	    {"id": "dup", "channel_id": "c1", "label": "a", "url": "https://cdn.example/a.m3u8", "status": "active"},
+	    {"id": "dup", "channel_id": "c1", "label": "b", "url": "https://cdn.example/b.m3u8", "status": "active"}
+	  ]
+	}`)
+
+	_, streams, err := adapter.GetChannelWithStreams("c1")
+	if err != nil {
+		t.Fatalf("GetChannelWithStreams: %v", err)
+	}
+	if len(streams) != 2 {
+		t.Fatalf("streams = %d, want 2 (stream rows are not deduplicated)", len(streams))
+	}
+	for _, s := range streams {
+		if s.ID != "dup" {
+			t.Errorf("provided id changed to %q; explicit ids are used verbatim", s.ID)
+		}
+	}
+}
+
+// BLOCKING 2 (delta): a suffixed derived id must not displace a later row that
+// legitimately owns that exact id.
+func TestExplicitIDSurvivesDerivedCollision(t *testing.T) {
+	category := "Action"
+	base := derivedEntryID(source.Entry{Name: "Dup", Category: &category})
+
+	adapter := mustRawAdapter(t, `{"entries":[
+	  {"name":"Dup","category":"Action"},
+	  {"name":"Dup","category":"Action"},
+	  {"id":"`+base+`-2","name":"Independent Title","category":"Comedy"}]}`)
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 50)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("total = %d, want 3: the explicit row must not be displaced by a derived id", total)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Name == "Independent Title" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the row with an explicit id was dropped")
+	}
+}
+
+// A row's survival must not depend on where it sits relative to an unrelated
+// collision: explicit-id-first and explicit-id-last must keep the same rows.
+func TestRowSurvivalIsIndependentOfFileOrder(t *testing.T) {
+	category := "Action"
+	base := derivedEntryID(source.Entry{Name: "Dup", Category: &category})
+	explicit := `{"id":"` + base + `-2","name":"Independent Title","category":"Comedy"}`
+	dup := `{"name":"Dup","category":"Action"}`
+
+	withExplicitLast := mustRawAdapter(t, `{"entries":[`+dup+`,`+dup+`,`+explicit+`]}`)
+	withExplicitFirst := mustRawAdapter(t, `{"entries":[`+explicit+`,`+dup+`,`+dup+`]}`)
+
+	last := sortedEntryNames(t, withExplicitLast)
+	first := sortedEntryNames(t, withExplicitFirst)
+	if !reflect.DeepEqual(last, first) {
+		t.Fatalf("surviving rows depend on file order: last=%v first=%v", last, first)
+	}
+	if len(last) != 3 {
+		t.Errorf("entries = %v, want 3 rows in both orders", last)
+	}
+}
+
+// NON-BLOCKING 3 (delta): a file-provided id is trimmed when stored, and the
+// channel_id/vod_id references are trimmed with it, so a padded id is still
+// looked up by its trimmed form.
+func TestPaddedIDsAndReferencesAreNormalized(t *testing.T) {
+	adapter := mustRawAdapter(t, `{
+	  "channels": [{"id": "  ch-padded  ", "name": "Padded", "category": "News", "status": "active"}],
+	  "entries": [{"id": "  vod-padded  ", "name": "Padded Movie", "type": "Movie", "category": "Films", "provider": "local", "status": "active"}],
+	  "episodes": [{"id": "  ep-padded  ", "vod_id": "  vod-padded  ", "season_number": 1, "episode_number": 1, "name": "P1", "stream_url": "https://cdn.example/p1.m3u8", "source_type": "local"}],
+	  "streams": [{"id": "  str-padded  ", "channel_id": "  ch-padded  ", "label": "m", "url": "https://cdn.example/s.m3u8", "status": "active"}],
+	  "vod_streams": [{"id": "  vstr-padded  ", "vod_id": "  vod-padded  ", "label": "m", "url": "https://cdn.example/vs.m3u8", "status": "online"}]
+	}`)
+
+	channel, err := adapter.GetChannel("ch-padded")
+	if err != nil {
+		t.Fatalf("GetChannel(trimmed): %v", err)
+	}
+	if channel.ID != "ch-padded" {
+		t.Errorf("channel id = %q, want the trimmed form", channel.ID)
+	}
+	if _, err := adapter.GetEntry("vod-padded"); err != nil {
+		t.Fatalf("GetEntry(trimmed): %v", err)
+	}
+	if _, err := adapter.GetEpisode("ep-padded"); err != nil {
+		t.Fatalf("GetEpisode(trimmed): %v", err)
+	}
+
+	episodes, err := adapter.GetEpisodes("vod-padded")
+	if err != nil {
+		t.Fatalf("GetEpisodes(trimmed): %v", err)
+	}
+	if len(episodes) != 1 {
+		t.Errorf("episodes = %d, want 1: the vod_id reference must be trimmed", len(episodes))
+	}
+
+	if _, streams, err := adapter.GetChannelWithStreams("ch-padded"); err != nil {
+		t.Fatalf("GetChannelWithStreams(trimmed): %v", err)
+	} else if len(streams) != 1 || streams[0].ID != "str-padded" {
+		t.Errorf("streams = %+v, want one str-padded: the channel_id reference must be trimmed", streams)
+	}
+	if _, err := adapter.GetVodStreams("vod-padded"); err != nil {
+		t.Fatalf("GetVodStreams(trimmed): %v", err)
+	}
+
+	channels, _, err := adapter.ListChannels("", 10, 0)
+	if err != nil {
+		t.Fatalf("ListChannels: %v", err)
+	}
+	if len(channels) != 1 || channels[0].ID != "ch-padded" {
+		t.Errorf("listed channel id = %q, want the trimmed form", channels[0].ID)
+	}
+}
+
+func sortedEntryNames(t *testing.T, adapter *Adapter) []string {
+	t.Helper()
+	entries, _, err := adapter.GetEntries("", "", "", 1, 50)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	names := entryNames(entries)
+	sort.Strings(names)
+	return names
 }
