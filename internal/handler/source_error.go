@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
+	"github.com/jmvbambico/adoboflix/internal/source/file"
 )
 
 // Stable, machine-readable error codes. A client branches on these instead of
@@ -75,6 +76,8 @@ func sourceErrorStatus(err error) (int, string) {
 	case errors.Is(err, adobotvhttp.ErrPlaylistFormatM3U):
 		return http.StatusBadGateway, codePlaylistFormatM3U
 	case errors.Is(err, adobotvhttp.ErrContentNotFound):
+		return http.StatusNotFound, codeContentNotFound
+	case errors.Is(err, file.ErrContentNotFound):
 		return http.StatusNotFound, codeContentNotFound
 	case errors.Is(err, sql.ErrNoRows):
 		return http.StatusNotFound, codeNotFound

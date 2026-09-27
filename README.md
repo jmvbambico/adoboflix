@@ -53,6 +53,10 @@ Configuration is via environment variables (`.env`, documented in
 |----------|---------|-------------|
 | `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required) |
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
+| `ADOBOFLIX_SOURCE` | — | Source adapter: `adobotv-http`, `file`, or `postgres-direct` |
+| `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (required by `adobotv-http`) |
+| `ADOBOFLIX_FILE_PATH` | — | Playlist JSON path (required by `file`) |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
 | `SERVER_PORT` | `5656` | Port |
 
@@ -76,7 +80,9 @@ Source adapters are interchangeable and read-only:
 
 - **`adobotv-http`** — production path; talks to AdoboTV over HTTP using the
   user's playlist code.
-- **`file`** — a local playlist (JSON or M3U) for users with no account.
+- **`file`** — a local playlist JSON file for users with no account. It is
+  read once at startup and never written, and it touches no database. (M3U is
+  not implemented yet; see `docs/source-adapters.md`.)
 - **`postgres-direct`** — a development test harness only. It bypasses
   entitlement and analytics, must stay behind explicit configuration, and is
   never the default.

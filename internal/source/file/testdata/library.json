@@ -1,0 +1,199 @@
+{
+  "channels": [
+    {
+      "id": "news-one",
+      "name": "News One",
+      "logo": "https://img.example/news-one.png",
+      "category": "News",
+      "epg_source_id": "news-src",
+      "epg_channel_id": "news-one.tvg",
+      "status": "active"
+    },
+    {
+      "id": "movies-hd",
+      "name": "Movies HD",
+      "category": "Movies",
+      "status": "active"
+    },
+    {
+      "id": "orphan",
+      "name": "Orphan",
+      "category": "News",
+      "status": "active"
+    }
+  ],
+  "entries": [
+    {
+      "id": "vod-movie",
+      "name": "Movie A",
+      "type": "Movie",
+      "category": "Films",
+      "poster": "https://img.example/movie-a.jpg",
+      "plot": "A movie.",
+      "cast_members": ["Actor One", "Actor Two"],
+      "directors": ["Director One"],
+      "release_year": 2024,
+      "rating": "PG",
+      "status": "active",
+      "provider": "local",
+      "duration": 5400,
+      "user_agent": "LocalUA/1.0",
+      "created_at": "2024-01-01T00:00:00Z"
+    },
+    {
+      "id": "vod-series",
+      "name": "Series B",
+      "type": "Series",
+      "category": "Shows",
+      "status": "active",
+      "provider": "local",
+      "cast_members": [],
+      "directors": [],
+      "created_at": "2024-02-01T00:00:00Z"
+    },
+    {
+      "id": "vod-4",
+      "name": "Movie D",
+      "type": "Movie",
+      "category": "Films",
+      "status": "active",
+      "provider": "local",
+      "cast_members": [],
+      "directors": [],
+      "created_at": "2024-03-01T00:00:00Z"
+    },
+    {
+      "id": "vod-5",
+      "name": "Series E",
+      "type": "Series",
+      "category": "Shows",
+      "status": "active",
+      "provider": "other",
+      "cast_members": [],
+      "directors": [],
+      "created_at": "2024-04-01T00:00:00Z"
+    },
+    {
+      "id": "vod-doc",
+      "name": "Documentary C",
+      "type": "Movie",
+      "category": "Docs",
+      "status": "active",
+      "provider": "other",
+      "cast_members": [],
+      "directors": []
+    }
+  ],
+  "streams": [
+    {
+      "id": "mov-alt",
+      "channel_id": "movies-hd",
+      "label": "alt",
+      "url": "https://cdn.example/live/movies-alt/index.m3u8",
+      "source_type": "local",
+      "is_default": false,
+      "status": "active",
+      "resolution": "1080p",
+      "bitrate": 4000
+    },
+    {
+      "id": "mov-main",
+      "channel_id": "movies-hd",
+      "label": "main",
+      "url": "https://cdn.example/live/movies-main/index.m3u8",
+      "source_type": "local",
+      "is_default": true,
+      "status": "active",
+      "resolution": "1080p",
+      "bitrate": 6000
+    },
+    {
+      "id": "mov-backup",
+      "channel_id": "movies-hd",
+      "label": "backup",
+      "url": "https://cdn.example/live/movies-backup/index.m3u8",
+      "source_type": "local",
+      "is_default": false,
+      "status": "offline",
+      "referer": "https://cdn.example/"
+    },
+    {
+      "id": "mov-dead",
+      "channel_id": "movies-hd",
+      "label": "dead",
+      "url": "",
+      "source_type": "local",
+      "is_default": false,
+      "status": "offline",
+      "resolution": "720p"
+    },
+    {
+      "id": "news-primary",
+      "channel_id": "news-one",
+      "label": "primary",
+      "url": "https://cdn.example/live/news-primary/index.m3u8",
+      "source_type": "local",
+      "is_default": false,
+      "status": "offline"
+    },
+    {
+      "id": "news-backup",
+      "channel_id": "news-one",
+      "label": "backup",
+      "url": "https://cdn.example/live/news-backup/index.m3u8",
+      "source_type": "local",
+      "is_default": false,
+      "status": "active",
+      "user_agent": "NewsUA/2.0"
+    }
+  ],
+  "vod_streams": [
+    {
+      "id": "movie-backup",
+      "vod_id": "vod-movie",
+      "label": "backup",
+      "url": "https://cdn.example/vod/movie/backup.m3u8",
+      "source_type": "local",
+      "is_default": false,
+      "status": "offline"
+    },
+    {
+      "id": "movie-main",
+      "vod_id": "vod-movie",
+      "label": "main",
+      "url": "https://cdn.example/vod/movie/main.m3u8",
+      "source_type": "local",
+      "is_default": true,
+      "status": "active"
+    }
+  ],
+  "episodes": [
+    {
+      "id": "series-s2e1",
+      "vod_id": "vod-series",
+      "season_number": 2,
+      "episode_number": 1,
+      "name": "Season 2 Premiere",
+      "stream_url": "https://cdn.example/vod/series/s02e01.m3u8",
+      "source_type": "local"
+    },
+    {
+      "id": "series-s1e2",
+      "vod_id": "vod-series",
+      "season_number": 1,
+      "episode_number": 2,
+      "name": "Episode Two",
+      "stream_url": "https://cdn.example/vod/series/s01e02.m3u8",
+      "source_type": "local"
+    },
+    {
+      "id": "series-s1e1",
+      "vod_id": "vod-series",
+      "season_number": 1,
+      "episode_number": 1,
+      "name": "Episode One",
+      "stream_url": "https://cdn.example/vod/series/s01e01.m3u8",
+      "source_type": "local"
+    }
+  ]
+}
