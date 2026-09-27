@@ -56,11 +56,11 @@ async function capturedFilter(): Promise<RequestFilter> {
   return filter;
 }
 
-function renderPlayer(userAgent?: string, referer?: string) {
+function renderPlayer(userAgent?: string, referer?: string, videoUrl: string = CDN_MANIFEST) {
   return render(
     <CustomPlayer
       id="player-under-test"
-      videoUrl={CDN_MANIFEST}
+      videoUrl={videoUrl}
       title="Test Stream"
       thumbnailUrl=""
       durationSeconds={0}
@@ -112,5 +112,40 @@ describe("CustomPlayer proxy request filter", () => {
 
     const url = new URL(request.uris[0]);
     expect(url.searchParams.has("ref")).toBe(false);
+  });
+
+  it("forwards exactly the configured referer", async () => {
+    renderPlayer(undefined, "https://embed.example.com/player/abc");
+    const filter = await capturedFilter();
+
+    const request = { uris: [CDN_SEGMENT] };
+    filter(0, request);
+
+    const url = new URL(request.uris[0]);
+    expect(url.searchParams.get("ref")).toBe("https://embed.example.com/player/abc");
+  });
+
+  it("forwards the manifest's source and keeps ua and ref closed", async () => {
+    renderPlayer(undefined, undefined, `${CDN_MANIFEST}?source=DRM`);
+    const filter = await capturedFilter();
+
+    const request = { uris: [CDN_SEGMENT] };
+    filter(0, request);
+
+    const url = new URL(request.uris[0]);
+    expect(url.searchParams.get("source")).toBe("DRM");
+    expect(url.searchParams.has("ua")).toBe(false);
+    expect(url.searchParams.has("ref")).toBe(false);
+  });
+
+  it("adds no source parameter when the manifest URL declares none", async () => {
+    renderPlayer();
+    const filter = await capturedFilter();
+
+    const request = { uris: [CDN_SEGMENT] };
+    filter(0, request);
+
+    const url = new URL(request.uris[0]);
+    expect(url.searchParams.has("source")).toBe(false);
   });
 });
