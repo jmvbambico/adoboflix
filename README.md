@@ -36,11 +36,16 @@ git clone https://github.com/jmvbambico/adoboflix.git
 cd adoboflix
 cp .env.example .env          # then set ADOBOFLIX_PG_URL
 
-cd client && npm install && npm run build && cd ..
+cd client && npm ci --include=dev && npm run build && cd ..
 
 go build -o adoboflix ./cmd/server
 ./adoboflix --port 5656
 ```
+
+`npm run build` writes the bundle straight into `static/`, which the Go binary
+serves — there is no separate copy step, and `client/dist/` is not used. If the
+environment sets `NODE_ENV=production`, install the build's devDependencies
+with `npm ci --include=dev` first, as above.
 
 Open **http://127.0.0.1:5656** in your browser.
 

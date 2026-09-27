@@ -41,8 +41,6 @@ interface CustomPlayerProps {
   onPlayEpisode?: (episode: Episode) => void;
 }
 
-const DEFAULT_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
-
 export default function CustomPlayer({
   id,
   videoUrl,
@@ -198,11 +196,14 @@ export default function CustomPlayer({
           }
         }
 
-        // Wrap external (CDN) URLs through the backend proxy
-        const ua = userAgent || DEFAULT_UA;
+        // Wrap external (CDN) URLs through the backend proxy. Only forward a
+        // user agent the stream actually configures: with no ua parameter the
+        // server forwards the browser's own User-Agent, which is what origins
+        // expect. A fabricated default reads as malformed and is 403'd by
+        // origins that filter on it (A2Z/ZTE JITP DRM). Same for referer.
         let proxyUrl = `${BACKEND_BASE}/api/v1/proxy?url=${encodeURIComponent(uri)}`;
         if (sourceType) proxyUrl += `&source=${encodeURIComponent(sourceType)}`;
-        if (ua) proxyUrl += `&ua=${encodeURIComponent(ua)}`;
+        if (userAgent) proxyUrl += `&ua=${encodeURIComponent(userAgent)}`;
         if (referer) proxyUrl += `&ref=${encodeURIComponent(referer)}`;
         request.uris = [proxyUrl];
       });

@@ -24,6 +24,7 @@ import MediaCard from "./MediaCard";
 import CustomPlayer from "./CustomPlayer";
 import GlowBackground from "./GlowBackground";
 import SourceStatusPanel from "./SourceStatusPanel";
+import { describeChannelStatus } from "./channelStatus";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
   ChevronDown, ChevronRight, CircleCheck, Film, ListFilter, Users, BookOpen,
@@ -827,7 +828,8 @@ export default function Dashboard() {
                         : (selectedVideo.provider && /HLS|DASH|MP4/i.test(selectedVideo.provider)
                           ? selectedVideo.provider.toUpperCase()
                           : "MP4");
-                      const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+                      const ua = selectedVideo.userAgent;
+                      const ref = selectedVideo.referer;
                       return (
                         <div className="border-t border-white/5 pt-4">
                           <div className="flex items-center gap-2 mb-3">
@@ -882,16 +884,16 @@ export default function Dashboard() {
                             {/* User Agent */}
                             <div className="flex flex-col gap-1">
                               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">User Agent</span>
-                              <span className="text-[9px] font-mono text-slate-400 truncate max-w-[180px]" title={ua}>
-                                {ua.length > 50 ? ua.slice(0, 50) + "…" : ua}
+                              <span className="text-[9px] font-mono text-slate-400 truncate max-w-[180px]" title={ua || ""}>
+                                {ua ? (ua.length > 50 ? ua.slice(0, 50) + "…" : ua) : "—"}
                               </span>
                             </div>
 
                             {/* Referer */}
                             <div className="flex flex-col gap-1">
                               <span className="text-[10px] font-mono text-slate-500 uppercase tracking-wider">Referer</span>
-                              <span className="text-[9px] font-mono text-slate-400 truncate max-w-[180px]" title="google.com">
-                                google.com
+                              <span className="text-[9px] font-mono text-slate-400 truncate max-w-[180px]" title={ref || ""}>
+                                {ref || "—"}
                               </span>
                             </div>
                           </div>
@@ -1580,7 +1582,7 @@ export default function Dashboard() {
                                                 {channel.name}
                                               </h4>
                                               <span className="text-[9px] font-mono text-slate-500 truncate">
-                                                {channel.status === "active" ? "Now Playing · HLS Ready" : "Standby · Inactive"}
+                                                {describeChannelStatus(channel.status)}
                                               </span>
                                             </div>
                                           </div>
