@@ -11,11 +11,18 @@ live `settings` table — the surprises are marked.
 
 ## The three adapters
 
-| Adapter | For | Status |
-|---|---|---|
-| `adobotv-http` | A subscriber with an AdoboTV account | The real path |
-| `file` | Someone with no account and their own playlist | Supported |
-| `postgres-direct` | Verifying the player itself | **Development harness only** |
+| Adapter | For | Database | Status |
+|---|---|---|---|
+| `adobotv-http` | A subscriber with an AdoboTV account | none | The real path |
+| `file` | Someone with no account and their own playlist | none | Supported |
+| `postgres-direct` | Verifying the player itself | **required** | **Development harness only** |
+
+Only `postgres-direct` needs `ADOBOFLIX_PG_URL`. Each adapter declares its need
+at registration (`source.Register`) and the server opens a database connection
+only when the selected one asks for it: `adobotv-http` and `file` read no SQL
+handle at all and never dial one. That is the main practical reason to choose
+`file` — the person it exists for has no AdoboTV account, and usually no AdoboTV
+database either.
 
 `postgres-direct` exists today and is what proved DASH+Clearkey playback works
 end to end. It bypasses entitlement, device authorisation, and every analytics
@@ -287,9 +294,203 @@ playlist code. Reaching *content* requires an operator to approve the device
 — one write to AdoboTV's `devices` table, which is the operator's call and not
 the client's.
 
+## `file` — a local playlist
+
+For the second user in `AGENTS.md`: someone with **no AdoboTV account** who
+already has a playlist and just wants AdoboFlix to play it. Point
+`ADOBOFLIX_FILE_PATH` at a JSON file and the repo boots into the same player
+the subscriber path uses — the player never learns where the content came
+from.
+
+The adapter reads the file **once, at startup**, into an in-memory library, and
+every query answers from that value. It never writes the file, imports no SQL
+package, and never touches the database — the server opens no connection for it
+at all, and `source.Config.DB` arrives nil. The read-only invariants hold
+structurally rather than by discipline. A path
+that cannot be read, or bytes that are not the documented JSON, is a **startup
+error** naming the path: AdoboFlix refuses to boot with a silently empty
+library, because an empty player is indistinguishable from a broken one.
+
+### The format is the internal models, serialised
+
+There is no friendlier hand-authored format and no translation layer. The file
+is a **direct serialisation of the Go types in `internal/source/models.go`** —
+`Channel`, `Entry`, `Stream`, `VodStream`, `Episode` — in one object with five
+arrays. The field names are the models' own `json` tags, which is why an
+entry's provider is spelled `provider` (it is `Entry.SourceType`) while a
+stream's is `source_type`.
+
+```json
+{
+  "channels": [
+    {
+      "id": "news-one",
+      "name": "News One",
+      "category": "News",
+      "logo": "https://img.example/news-one.png",
+      "epg_channel_id": "news-one.tvg",
+      "status": "active"
+    }
+  ],
+  "entries": [
+    {
+      "id": "movie-a",
+      "name": "Movie A",
+      "type": "Movie",
+      "category": "Films",
+      "provider": "local",
+      "status": "active",
+      "poster": "https://img.example/movie-a.jpg",
+      "cast_members": ["Actor One"],
+      "directors": ["Director One"],
+      "release_year": 2024,
+      "created_at": "2024-01-01T00:00:00Z"
+    },
+    {
+      "id": "series-b",
+      "name": "Series B",
+      "type": "Series",
+      "category": "Shows",
+      "provider": "local",
+      "status": "active",
+      "created_at": "2024-02-01T00:00:00Z"
+    }
+  ],
+  "streams": [
+    {
+      "id": "news-main",
+      "channel_id": "news-one",
+      "label": "main",
+      "url": "https://mycdn.example/news/index.m3u8",
+      "source_type": "local",
+      "is_default": true,
+      "status": "active"
+    }
+  ],
+  "vod_streams": [
+    {
+      "id": "movie-a-main",
+      "vod_id": "movie-a",
+      "label": "main",
+      "url": "https://mycdn.example/movies/a/index.mpd",
+      "source_type": "local",
+      "drm_type": "Widevine",
+      "license_url": "https://mycdn.example/license",
+      "is_default": true,
+      "status": "active"
+    }
+  ],
+  "episodes": [
+    {
+      "id": "series-b-s01e01",
+      "vod_id": "series-b",
+      "season_number": 1,
+      "episode_number": 1,
+      "name": "Pilot",
+      "stream_url": "https://mycdn.example/shows/b/s01e01.m3u8",
+      "source_type": "local"
+    }
+  ]
+}
+```
+
+Rules worth stating, because they are choices rather than accidents:
+
+- **Every array is optional.** `{}` is a valid empty library.
+- **Child rows point at their parent by id.** A `stream`'s `channel_id`, a
+  `vod_stream`'s `vod_id` and an `episode`'s `vod_id` name the parent's id *as
+  written in the file*.
+- **Order in the file does not matter.** The adapter sorts every list it
+  returns, because Go map iteration is random and an unsorted list would flap
+  between calls.
+- **`created_at` drives "newest first".** Entries with a timestamp come before
+  those without (`NULLS LAST`), and ties break by name.
+- **Values are compared as trimmed text.** A category written `" Films "` is
+  exposed *and filtered* as `Films`, and genres, providers and channel
+  categories are listed once per case-insensitive value — so the list never
+  advertises something the filter would fail to match. Ids and the
+  `channel_id`/`vod_id` references are trimmed the same way, so
+  `"  ch-padded  "` is looked up (and listed) as `ch-padded`.
+
+### How ids are derived
+
+An id is **whatever the file provides** — `"news-one"`, a slug, a uuid. The
+adapter never parses it; the interface treats it as an opaque, adapter-owned
+token.
+
+When a file omits one, the adapter synthesises a stable id so a URL a user
+bookmarked still resolves after a reload. The shape is a truncated SHA-256 over
+the item's identity fields, prefixed so the kinds stay apart:
+
+| Kind | Prefix | Derived from |
+|---|---|---|
+| Channel | `ch-` | name, category |
+| Entry | `vod-` | name, category |
+| Stream | `str-` | channel_id, label, url |
+| VodStream | `str-` | vod_id, label, url |
+| Episode | `ep-` | vod_id, season_number, episode_number, name, stream_url |
+
+The episode derivation includes the name and stream URL on purpose: a playlist
+may list episodes without season/episode numbers, and those unmarshal to `0`.
+Hashing only the numbers would give every such episode the same id and the
+loader would drop all but the first. Including enough identity keeps rows that
+genuinely differ apart.
+
+Ids are assigned in **two passes**, so file order never changes which rows
+exist: every id the file spells out is reserved first, and a derived id is
+drawn from outside that set. An explicit id therefore always wins over a
+derived one, wherever the two sit relative to each other. A derived id that
+would still collide with another derived id (the two rows are identical in
+every field the derivation reads) is suffixed (`…-2`, `…-3`), following file
+order so it stays stable across reloads, rather than dropping a genuinely
+distinct row.
+
+A row that repeats an id the file has already given an earlier row of the same
+kind is ambiguous: for channels, entries and episodes the later one is skipped.
+Streams and `vod_streams` are the exception — every row is kept, because two
+rows under one channel are two streams and nothing looks a stream up by id.
+Their derived ids still avoid every id the file provides.
+
+Derivation only helps **top-level** items, because a child references its
+parent by an id the file spells out. A derived parent id cannot be referenced,
+so a file that wants its streams or episodes grouped must give the parent an
+id. An un-referenced child row is kept but unreachable through that parent.
+
+### Capabilities
+
+- **`StreamProbeLister` — supported.** A local playlist's live streams can be
+  enumerated, so AdoboFlix can tell its user which of their own streams are
+  dead. It is a report and nothing more: the adapter hands over a URL, the
+  scanner redacts it to a host and a manifest before it reaches any report
+  (`internal/scanner.RedactStreamURL`), and no result is ever persisted. Streams
+  with no URL are skipped, and VOD streams and episodes are not enumerated —
+  the report is about live channels.
+- **`CompiledEPGProvider` — deliberately not supported.** A playlist file
+  carries no gzipped XMLTV blob, so there is nothing honest to return. Leaving
+  it unimplemented makes the EPG endpoint answer with
+  `source.UnsupportedEPGError` and name why, instead of inventing an empty
+  guide.
+
+### Configuration
+
+| Key | Required | Meaning |
+|---|---|---|
+| `ADOBOFLIX_FILE_PATH` | yes | Path to the JSON playlist. Unset or unreadable is a startup error. |
+
+### Not implemented: M3U
+
+These docs promise "JSON or M3U". Only the JSON form above is implemented
+today; an M3U playlist is a separate piece of work. The loader parses bytes
+into one in-memory library value and the query methods read that value, so an
+M3U parser can be added later without touching any query code.
+
+---
+
 ## Why not the database
 
-`postgres-direct` is a test harness, and the reason is not hygiene.
+`postgres-direct` is a test harness, and the reason is not hygiene. It is also
+the only adapter that opens a database connection at all — the other two
+declare no database need, so the server never dials one for them.
 
 AdoboTV records a playback event at **both** `/v1/drm/key/` (channel or VOD
 access, per content id and user) and `/v1/play/*`. Its README calls

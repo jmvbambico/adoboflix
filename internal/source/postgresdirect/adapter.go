@@ -37,7 +37,10 @@ var (
 )
 
 func init() {
-	source.Register(Name, func(cfg source.Config) (source.Source, error) {
+	// postgres-direct is the only adapter that reads the schema directly, so it
+	// is the only one that declares a database requirement. main opens the
+	// connection for it and passes the handle in Config.DB.
+	source.Register(Name, source.Requirement{Database: true}, func(cfg source.Config) (source.Source, error) {
 		return New(cfg.DB)
 	})
 }

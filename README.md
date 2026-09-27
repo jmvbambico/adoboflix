@@ -51,8 +51,12 @@ Configuration is via environment variables (`.env`, documented in
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required) |
+| `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required by `postgres-direct`) |
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
+| `ADOBOFLIX_SOURCE` | — | Source adapter: `adobotv-http`, `file`, or `postgres-direct` |
+| `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (required by `adobotv-http`) |
+| `ADOBOFLIX_FILE_PATH` | — | Playlist JSON path (required by `file`) |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
 | `SERVER_PORT` | `5656` | Port |
 
@@ -72,14 +76,21 @@ that schema**; this repository does not duplicate, migrate, or mutate it. See
 the AdoboTV project for the authoritative table definitions. Queries select
 explicit columns and are strictly read-only.
 
+Only the **`postgres-direct`** source needs `ADOBOFLIX_PG_URL`. Each adapter
+declares its requirement at registration and the server opens a database
+connection only when the selected one asks for it: `adobotv-http` and `file`
+need no database and never dial one.
+
 Source adapters are interchangeable and read-only:
 
 - **`adobotv-http`** — production path; talks to AdoboTV over HTTP using the
-  user's playlist code.
-- **`file`** — a local playlist (JSON or M3U) for users with no account.
-- **`postgres-direct`** — a development test harness only. It bypasses
-  entitlement and analytics, must stay behind explicit configuration, and is
-  never the default.
+  user's playlist code. Needs no database.
+- **`file`** — a local playlist JSON file for users with no account. It is
+  read once at startup and never written, and it touches no database. (M3U is
+  not implemented yet; see `docs/source-adapters.md`.)
+- **`postgres-direct`** — a development test harness only, and the only source
+  that reads the database. It bypasses entitlement and analytics, must stay
+  behind explicit configuration, and is never the default.
 
 ## API
 

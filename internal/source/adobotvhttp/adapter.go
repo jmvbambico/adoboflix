@@ -63,7 +63,7 @@ var (
 func init() {
 	// The source.Config database handle is intentionally ignored: this adapter
 	// has no database access by construction.
-	source.Register(Name, func(source.Config) (source.Source, error) {
+	source.Register(Name, source.Requirement{}, func(source.Config) (source.Source, error) {
 		return NewFromEnv()
 	})
 }

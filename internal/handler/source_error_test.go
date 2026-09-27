@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/source"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
+	"github.com/jmvbambico/adoboflix/internal/source/file"
 )
 
 // TestSourceErrorStatus pins one case per sentinel: the status code the client
@@ -29,6 +30,7 @@ func TestSourceErrorStatus(t *testing.T) {
 		{"user-agent rejected", fmt.Errorf("%w: prefix", adobotvhttp.ErrUserAgentRejected), http.StatusForbidden, codeUserAgentRejected},
 		{"playlist format m3u", fmt.Errorf("%w: KODIPROP", adobotvhttp.ErrPlaylistFormatM3U), http.StatusBadGateway, codePlaylistFormatM3U},
 		{"content not found", fmt.Errorf("%w: opaque id", adobotvhttp.ErrContentNotFound), http.StatusNotFound, codeContentNotFound},
+		{"file content not found", fmt.Errorf("%w: opaque id", file.ErrContentNotFound), http.StatusNotFound, codeContentNotFound},
 		{"sql no rows", fmt.Errorf("get vod asset x: %w", sql.ErrNoRows), http.StatusNotFound, codeNotFound},
 		{"malformed envelope", fmt.Errorf("%w: not json", adobotvhttp.ErrMalformedEnvelope), http.StatusBadGateway, codeMalformedPlaylist},
 		{"malformed drm", fmt.Errorf("%w: not base64", adobotvhttp.ErrMalformedDRM), http.StatusBadGateway, codeMalformedDRM},

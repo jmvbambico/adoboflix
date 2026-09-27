@@ -3,6 +3,8 @@ package source
 import (
 	"strings"
 	"testing"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // fakeSource is only here to prove registration/opening works without a
@@ -44,7 +46,7 @@ func TestOpenRequiresConfiguredSource(t *testing.T) {
 func TestOpenUsesRegisteredFactory(t *testing.T) {
 	const name = "test-only-adapter"
 	want := &fakeSource{}
-	Register(name, func(Config) (Source, error) { return want, nil })
+	Register(name, Requirement{}, func(Config) (Source, error) { return want, nil })
 
 	got, err := Open(Config{Name: name})
 	if err != nil {
@@ -57,7 +59,7 @@ func TestOpenUsesRegisteredFactory(t *testing.T) {
 
 func TestRegisteredSourceIsAvailable(t *testing.T) {
 	const name = "test-only-adapter-2"
-	Register(name, func(Config) (Source, error) { return &fakeSource{}, nil })
+	Register(name, Requirement{}, func(Config) (Source, error) { return &fakeSource{}, nil })
 
 	for _, n := range Available() {
 		if n == name {
@@ -65,4 +67,84 @@ func TestRegisteredSourceIsAvailable(t *testing.T) {
 		}
 	}
 	t.Errorf("Available() = %v, want it to contain %q", Available(), name)
+}
+
+// An adapter that declares no database need opens with a nil handle, and the
+// nil is passed through unchanged.
+func TestOpenPassesNilHandleToDatabaseAgnosticAdapter(t *testing.T) {
+	const name = "test-no-db-adapter"
+	var gotDB *sqlx.DB
+	want := &fakeSource{}
+	Register(name, Requirement{}, func(cfg Config) (Source, error) {
+		gotDB = cfg.DB
+		return want, nil
+	})
+
+	got, err := Open(Config{Name: name})
+	if err != nil {
+		t.Fatalf("Open(%q): %v", name, err)
+	}
+	if got != want {
+		t.Errorf("Open returned %v, want the registered source", got)
+	}
+	if gotDB != nil {
+		t.Errorf("factory received handle %v, want nil", gotDB)
+	}
+	if NeedsDatabase(name) {
+		t.Errorf("NeedsDatabase(%q) = true, want false", name)
+	}
+}
+
+// A database-requiring adapter is never handed a nil handle: Open refuses
+// before the factory runs.
+func TestOpenRefusesNilHandleForDatabaseAdapter(t *testing.T) {
+	const name = "test-db-adapter"
+	called := false
+	Register(name, Requirement{Database: true}, func(Config) (Source, error) {
+		called = true
+		return &fakeSource{}, nil
+	})
+
+	if !NeedsDatabase(name) {
+		t.Fatalf("NeedsDatabase(%q) = false, want true", name)
+	}
+
+	_, err := Open(Config{Name: name})
+	if err == nil {
+		t.Fatal("Open with a nil handle = nil error, want a clear failure")
+	}
+	if !strings.Contains(err.Error(), name) {
+		t.Errorf("error %q does not name the adapter", err)
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "database") {
+		t.Errorf("error %q does not say why the adapter needs a handle", err)
+	}
+	if called {
+		t.Error("the factory ran despite the missing handle; Open must fail before it")
+	}
+}
+
+// With a handle supplied, a database-requiring adapter opens normally.
+func TestOpenPassesHandleToDatabaseAdapter(t *testing.T) {
+	const name = "test-db-adapter-with-handle"
+	handle := &sqlx.DB{}
+	var gotDB *sqlx.DB
+	Register(name, Requirement{Database: true}, func(cfg Config) (Source, error) {
+		gotDB = cfg.DB
+		return &fakeSource{}, nil
+	})
+
+	if _, err := Open(Config{Name: name, DB: handle}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if gotDB != handle {
+		t.Errorf("factory received %v, want the supplied handle", gotDB)
+	}
+}
+
+// NeedsDatabase reports false for a name that is not registered.
+func TestNeedsDatabaseUnknownName(t *testing.T) {
+	if NeedsDatabase("no-such-adapter") {
+		t.Error("NeedsDatabase(unknown) = true, want false")
+	}
 }
