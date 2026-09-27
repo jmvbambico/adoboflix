@@ -84,13 +84,27 @@ function defaultStatus(activeName: "adobotv-http" | "file" | "", configured: boo
 interface BackendOptions extends Partial<StatusShape> {
   // The status the DELETE returns. >= 300 simulates a failed disconnect.
   deleteStatus?: number;
+  // The reply DELETE /source/playlist-file gives. >= 300 simulates a failed
+  // removal.
+  removeStatus?: number;
+  // What /api/v1/stats reports — the import shape's playlist count.
+  stats?: { total_titles: number; total_providers: number; total_genres: number };
 }
 
-// installBackend serves the status endpoint and the DELETE that disconnects.
-// It records every call so a test can assert the destructive request was not
-// made until the user confirmed.
+const FILE_URL = "/api/v1/source/playlist-file";
+const STATS_URL = "/api/v1/stats";
+
+// installBackend serves the status endpoint, the stats read the import shape
+// makes, and the two DELETEs that disconnect or remove. It records every call
+// so a test can assert a destructive request was not made until the user
+// confirmed.
 function installBackend(init: BackendOptions = {}) {
-  const { deleteStatus = 200, ...statusInit } = init;
+  const {
+    deleteStatus = 200,
+    removeStatus = 200,
+    stats = { total_titles: 7, total_providers: 2, total_genres: 3 },
+    ...statusInit
+  } = init;
   const status: StatusShape = { ...defaultStatus("adobotv-http", false), ...statusInit };
   const calls: FetchCall[] = [];
 
@@ -102,6 +116,7 @@ function installBackend(init: BackendOptions = {}) {
       calls.push({ url, method });
 
       if (url.endsWith(STATUS_URL)) return makeResponse(200, status);
+      if (url.endsWith(STATS_URL)) return makeResponse(200, stats);
       if (url.endsWith(CODE_URL) && method === "DELETE") {
         if (deleteStatus >= 300) {
           return makeResponse(deleteStatus, { error: "could not clear", code: "internal_error" });
@@ -109,11 +124,31 @@ function installBackend(init: BackendOptions = {}) {
         status.playlist_code_configured = false;
         return makeResponse(200, status);
       }
+      if (url.endsWith(FILE_URL) && method === "DELETE") {
+        if (removeStatus >= 300) {
+          return makeResponse(removeStatus, { error: "could not clear", code: "internal_error" });
+        }
+        // The server clears the mode too when the removed playlist was active,
+        // returning to the sourceless state the chooser is offered from.
+        Object.assign(status, defaultStatus("", false));
+        return makeResponse(200, status);
+      }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     }),
   );
 
   return { status, calls };
+}
+
+// importStatus is a normal active local-playlist source.
+function importStatus(): Partial<StatusShape> {
+  return {
+    source: "file",
+    needs_playlist_code: false,
+    playlist_code_configured: false,
+    playlist_file_configured: true,
+    modes: modesFor("file", false),
+  };
 }
 
 function renderMenu(init: BackendOptions = {}) {
@@ -239,25 +274,52 @@ describe("AccountMenu", () => {
     expect(screen.getByText("Welcome to AdoboTV cryogenix!")).toBeInTheDocument();
   });
 
-  it("says plainly when the source needs no playlist code", async () => {
-    const { queryClient } = renderMenu({
-      source: "file",
-      needs_playlist_code: false,
-      playlist_code_configured: false,
-      playlist_file_configured: true,
-      modes: modesFor("file", false),
-    });
+  // The import user is a peer of the subscriber, not a second-class citizen:
+  // they see a positive statement of their setup and the size of their own
+  // playlist, and they get a Remove action. Nothing is framed as an absence.
+  it("shows the import user their playlist and how much is in it", async () => {
+    const { queryClient } = renderMenu({ ...importStatus(), stats: { total_titles: 7, total_providers: 2, total_genres: 3 } });
     await openMenu(queryClient, "Local playlist");
 
-    // Positive: our word for the local-playlist path, and the no-account note.
+    // Positive: our word for the local-playlist path, a positive framing, and
+    // the count from the server's own stats read.
     expect(screen.getByText("Local playlist")).toBeInTheDocument();
-    expect(screen.getByText(/no account needed/i)).toBeInTheDocument();
-    // Negative: the raw adapter name is not printed as the user's choice.
+    expect(screen.getByText(/playing your local playlist/i)).toBeInTheDocument();
+    expect(screen.getByText(/an adobotv account is optional/i)).toBeInTheDocument();
+    expect(await screen.findByText("7 titles loaded")).toBeInTheDocument();
+    // Negative: the raw adapter name is not printed as the user's choice, and
+    // the old absence framing is gone.
     expect(screen.queryByText("file")).not.toBeInTheDocument();
-    // The code path is still offered as a switch, labelled as a login, not as
-    // connecting a code to a source that takes none.
-    expect(screen.getByRole("menuitem", { name: /login to adobotv/i })).toBeInTheDocument();
+    expect(screen.queryByText(/no account needed/i)).not.toBeInTheDocument();
+    // The import user gets a Remove action; Disconnect belongs to the code path.
+    expect(screen.getByRole("menuitem", { name: /remove playlist/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /disconnect/i })).not.toBeInTheDocument();
+    // The code path is still offered as a login — a first-class switch, not a
+    // fallback the user has to discover.
+    expect(screen.getByRole("menuitem", { name: /login to adobotv/i })).toBeInTheDocument();
+  });
+
+  // The two shapes are different sections, not one panel with empty slots: an
+  // import user is not shown AdoboTV-only facts, and a subscriber is not shown
+  // a playlist count.
+  it("does not show playlist facts to an AdoboTV subscriber", async () => {
+    const { queryClient, backend } = renderMenu({
+      playlist_code_configured: true,
+      subscription_expires_at: "2030-01-01T00:00:00Z",
+      user_message: "Renew by Friday.",
+      stats: { total_titles: 7, total_providers: 2, total_genres: 3 },
+    });
+    await openMenu(queryClient);
+
+    // Positive: the subscriber's own facts render.
+    expect(screen.getByText("Playlist code connected")).toBeInTheDocument();
+    expect(screen.getByText(/2030/)).toBeInTheDocument();
+    expect(screen.getByText("Renew by Friday.")).toBeInTheDocument();
+    // Negative: no playlist framing, and the stats endpoint was never read for
+    // this shape, so the absence is not merely a slow query.
+    expect(screen.queryByText(/playing your local playlist/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/titles loaded/i)).not.toBeInTheDocument();
+    expect(backend.calls.some((c) => c.url.endsWith("/api/v1/stats"))).toBe(false);
   });
 
   // A development harness is labelled plainly as one and never by its adapter
@@ -322,6 +384,73 @@ describe("AccountMenu", () => {
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(screen.getByLabelText("Playlist file")).toBeInTheDocument();
+  });
+
+  it("confirms before removing a playlist, and only then calls DELETE", async () => {
+    const { backend, queryClient } = renderMenu(importStatus());
+    await openMenu(queryClient, "Local playlist");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /remove playlist/i }));
+
+    // Negative: the destructive request has not been made yet.
+    expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
+    // Positive: the confirmation says what removing costs.
+    expect(screen.getByText(/returns you to the start screen/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /yes, remove/i }));
+
+    await waitFor(() => expect(backend.calls.some((c) => c.method === "DELETE")).toBe(true));
+    const del = backend.calls.find((c) => c.method === "DELETE");
+    expect(del?.url.endsWith(FILE_URL)).toBe(true);
+  });
+
+  it("lets the user back out of the remove confirmation", async () => {
+    const { backend, queryClient } = renderMenu(importStatus());
+    await openMenu(queryClient, "Local playlist");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /remove playlist/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
+
+    expect(screen.queryByText(/returns you to the start screen/i)).not.toBeInTheDocument();
+    expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  // Removal returns the server to the sourceless state; the menu must reflect
+  // that rather than continuing to describe a playlist that is gone.
+  it("shows no source after the playlist is removed", async () => {
+    const { queryClient } = renderMenu(importStatus());
+    await openMenu(queryClient, "Local playlist");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /remove playlist/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /yes, remove/i }));
+
+    // Positive: the menu now describes the sourceless state.
+    expect(await screen.findByText("Not connected")).toBeInTheDocument();
+    // Negative: the playlist framing is gone with it.
+    expect(screen.queryByText(/playing your local playlist/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /remove playlist/i })).not.toBeInTheDocument();
+  });
+
+  it("says so when removing a playlist fails, instead of silently removing it", async () => {
+    const { queryClient } = renderMenu({ ...importStatus(), removeStatus: 500 });
+    await openMenu(queryClient, "Local playlist");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /remove playlist/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /yes, remove/i }));
+
+    // Positive: the failure is reported.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/could not complete this request/i);
+    // Negative: the source is still described as the playlist, not removed.
+    expect(screen.getByText("Local playlist")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /remove playlist/i })).toBeInTheDocument();
+  });
+
+  it("disables Remove when the source is pinned", async () => {
+    const { queryClient } = renderMenu({ ...importStatus(), origin: "env" });
+    await openMenu(queryClient, "Local playlist");
+
+    expect(screen.getByText(/pinned to a content source by its server configuration/i)).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /remove playlist/i })).toBeDisabled();
   });
 
   it("confirms before disconnecting, and only then calls DELETE", async () => {

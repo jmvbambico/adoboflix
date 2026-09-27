@@ -216,10 +216,12 @@ describe("PlaylistCodeGate — first-run chooser", () => {
     installBackend({ active: false, needs: false });
     renderGate();
 
-    // Positive: the chooser heading and both derived options.
+    // Positive: the chooser heading, both derived options, and the line that
+    // makes the two equal rather than login-first.
     expect(await screen.findByRole("heading", { name: /choose how to connect/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /login to adobotv/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /import local playlist/i })).toBeInTheDocument();
+    expect(screen.getByText(/an adobotv account is optional/i)).toBeInTheDocument();
     // Negative: the chooser is the content, so no code form is forced on the
     // user before they pick the login path.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();

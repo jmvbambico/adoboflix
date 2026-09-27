@@ -3,15 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { FileUp, KeyRound, LogOut, RefreshCw, User } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MouseEvent,
+} from "react";
+import { useQuery } from "@tanstack/react-query";
+import { FileUp, KeyRound, LogOut, RefreshCw, Trash2, User } from "lucide-react";
+import { fetchStats, type AppStats } from "../api/client";
 import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
 import { usePlaylistCodeController } from "./playlistCode";
+import { usePlaylistFileController } from "./playlistFile";
 import { activeSourceLabel, isPinned, selectableModes } from "./sourceModes";
 import PlaylistCodeModal from "./PlaylistCodeModal";
 import PlaylistImportModal from "./PlaylistImportModal";
 
 type AccountModal = "code" | "import" | null;
+type Confirming = "disconnect" | "remove" | null;
 
 // formatExpiry renders the RFC3339 billing expiry the server reported. An
 // unparseable value is shown verbatim rather than as "Invalid Date".
@@ -21,39 +32,48 @@ function formatExpiry(iso: string): string {
   return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-// AccountMenu is the real account control where a placeholder once sat: the
-// avatar is a button that opens a dropdown describing the connected source and
-// offering the two actions AdoboFlix actually has. AdoboFlix owns no accounts,
-// so "log in" is connecting a playlist code and "log out" is disconnecting it —
-// the only credential a subscriber has. Nothing here invents a tier, a plan
-// label, or a display name: it shows only what the server reports.
+// AccountMenu is the real account control: the avatar is a button that opens a
+// dropdown describing the connected source and offering the actions AdoboFlix
+// actually has. AdoboFlix owns no accounts, so "log in" is connecting an
+// AdoboTV playlist code and the alternative is playing your own playlist —
+// neither is a fallback for the other.
 //
 // The offered actions are derived from the server's modes list, never from an
-// adapter name. A development harness is labelled as one and never printed as a
-// user's choice; an env-pinned source explains that its mode cannot change and
-// disables the actions that would fail with 409.
+// adapter name. The two modes get genuinely different detail sections, each
+// showing only what is true of it — a subscriber's account facts, or the import
+// user's own playlist facts — rather than one panel with empty slots. A
+// development harness is labelled as one and never printed as a user's choice;
+// an env-pinned source explains that its mode cannot change and disables the
+// actions that would fail with 409.
 export default function AccountMenu() {
   const [open, setOpen] = useState(false);
-  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
+  const [confirming, setConfirming] = useState<Confirming>(null);
   const [accountModal, setAccountModal] = useState<AccountModal>(null);
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const confirmYesRef = useRef<HTMLButtonElement>(null);
   const disconnectRef = useRef<HTMLButtonElement>(null);
+  const removeRef = useRef<HTMLButtonElement>(null);
+  const lastConfirm = useRef<Exclude<Confirming, null>>("disconnect");
   const wasConfirming = useRef(false);
 
   const { statusQuery, clear } = usePlaylistCodeController();
+  const { remove, removeError } = usePlaylistFileController();
   const status = statusQuery.data;
   const needsCode = Boolean(status?.needs_playlist_code);
   const configured = Boolean(status?.playlist_code_configured);
   const dev = Boolean(status?.dev);
-  const pinned = isPinned(status);
+  const paused = isPinned(status);
   // Loading and failure are NOT "this source has no account concept". Until an
   // answer arrives we know nothing about whether a code is needed, so the menu
   // must not assert one.
   const statusResolved = status !== undefined;
   const statusFailed = statusQuery.isError && !statusResolved;
+
+  // A non-code, non-dev active source is the local playlist; a code-taking one
+  // is the AdoboTV account. Dev is its own bare case above both.
+  const isImport = statusResolved && Boolean(status?.active) && !dev && !needsCode;
 
   const offers = selectableModes(status);
   const hasCodeOffer = offers.some((mode) => mode.needs_playlist_code);
@@ -62,9 +82,21 @@ export default function AccountMenu() {
 
   const disconnectError = clear.isError ? describeSourceError(clear.error) : null;
 
+  // The playlist's size, from the server's own count — the fact that confirms
+  // the right playlist loaded and shows when it did not. It is read only for
+  // the import shape, and a failed read renders nothing rather than inventing a
+  // number.
+  const statsQuery = useQuery<AppStats>({
+    queryKey: ["stats"],
+    queryFn: fetchStats,
+    enabled: isImport,
+    staleTime: 60 * 1000,
+  });
+  const stats = statsQuery.data;
+
   const closeMenu = useCallback((refocus: boolean) => {
     setOpen(false);
-    setConfirmingDisconnect(false);
+    setConfirming(null);
     if (refocus) buttonRef.current?.focus();
   }, []);
 
@@ -74,7 +106,7 @@ export default function AccountMenu() {
     if (!open) return;
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
 
-    const onPointerDown = (event: MouseEvent) => {
+    const onPointerDown = (event: globalThis.MouseEvent) => {
       const target = event.target as Node;
       if (menuRef.current?.contains(target) || buttonRef.current?.contains(target)) return;
       closeMenu(false);
@@ -93,20 +125,21 @@ export default function AccountMenu() {
     };
   }, [open, closeMenu]);
 
-  // Opening the disconnect confirmation unmounts the focused Disconnect button,
-  // so focus must be moved into the confirmation; cancelling must move it back.
-  // Without this, focus lands on <body> and the roving-focus arithmetic below
-  // sees index -1.
+  // Opening a confirmation unmounts the focused action button, so focus must be
+  // moved into the confirmation; cancelling must move it back to the action
+  // that opened it. Without this, focus lands on <body> and the roving-focus
+  // arithmetic below sees index -1. The ref is read after the re-render, so it
+  // points at the freshly mounted button rather than the unmounted one.
   useEffect(() => {
-    if (confirmingDisconnect) {
+    if (confirming) {
+      lastConfirm.current = confirming;
       confirmYesRef.current?.focus();
     } else if (wasConfirming.current) {
-      const target =
-        disconnectRef.current ?? menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]');
-      target?.focus();
+      const target = (lastConfirm.current === "remove" ? removeRef : disconnectRef).current;
+      (target ?? menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]'))?.focus();
     }
-    wasConfirming.current = confirmingDisconnect;
-  }, [confirmingDisconnect]);
+    wasConfirming.current = confirming !== null;
+  }, [confirming]);
 
   // Roving focus across the menu's actions, so role="menu" behaves as the role
   // promises for a keyboard user. An index of -1 (focus outside the items) is
@@ -144,6 +177,11 @@ export default function AccountMenu() {
     setAccountModal(null);
     buttonRef.current?.focus();
   }, []);
+
+  const openConfirm = (kind: Exclude<Confirming, null>, event: MouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.focus();
+    setConfirming(kind);
+  };
 
   return (
     <div className="relative">
@@ -195,26 +233,41 @@ export default function AccountMenu() {
                 </span>
               )
             ) : dev ? null : needsCode ? (
-              <span
-                className={`text-[11px] font-medium ${
-                  configured ? "text-emerald-400" : "text-amber-300"
-                }`}
-              >
-                {configured ? "Playlist code connected" : "No playlist code yet"}
-              </span>
-            ) : (
-              <span className="text-[11px] leading-relaxed text-slate-400">
-                No account needed — this source reads a local playlist.
-              </span>
-            )}
-            {statusResolved && status?.subscription_expires_at && (
-              <span className="text-[11px] text-slate-300">
-                Subscription renews {formatExpiry(status.subscription_expires_at)}
-              </span>
-            )}
-            {statusResolved && status?.user_message && (
-              <span className="text-[11px] leading-relaxed text-slate-300">{status.user_message}</span>
-            )}
+              <>
+                <span
+                  className={`text-[11px] font-medium ${
+                    configured ? "text-emerald-400" : "text-amber-300"
+                  }`}
+                >
+                  {configured ? "Playlist code connected" : "No playlist code yet"}
+                </span>
+                {status?.subscription_expires_at && (
+                  <span className="text-[11px] text-slate-300">
+                    Subscription renews {formatExpiry(status.subscription_expires_at)}
+                  </span>
+                )}
+                {status?.user_message && (
+                  <span className="text-[11px] leading-relaxed text-slate-300">
+                    {status.user_message}
+                  </span>
+                )}
+              </>
+            ) : isImport ? (
+              <>
+                <span className="text-[11px] font-medium text-emerald-400">
+                  Playing your local playlist
+                </span>
+                <span className="text-[11px] leading-relaxed text-slate-400">
+                  An AdoboTV account is optional — import a playlist you already have and play it
+                  here.
+                </span>
+                {stats && (
+                  <span className="text-[11px] text-slate-300">
+                    {stats.total_titles} {stats.total_titles === 1 ? "title" : "titles"} loaded
+                  </span>
+                )}
+              </>
+            ) : null}
           </div>
 
           {statusFailed && (
@@ -238,7 +291,7 @@ export default function AccountMenu() {
             <>
               <div className="h-px bg-white/5" role="none" />
 
-              {pinned && (
+              {paused && (
                 <p className="px-1 text-[11px] leading-relaxed text-amber-300/90">
                   {sourceStatusCopy("source_pinned_by_env").message}
                 </p>
@@ -248,7 +301,7 @@ export default function AccountMenu() {
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={pinned}
+                  disabled={paused}
                   onClick={() => openModal("code")}
                   className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -261,7 +314,7 @@ export default function AccountMenu() {
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={pinned}
+                  disabled={paused}
                   onClick={() => openModal("import")}
                   className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 >
@@ -270,9 +323,60 @@ export default function AccountMenu() {
                 </button>
               )}
 
+              {isImport && (
+                <>
+                  {confirming === "remove" ? (
+                    <div className="flex flex-col gap-2" role="none">
+                      <p className="text-[11px] leading-relaxed text-slate-300">
+                        Removing deletes the imported playlist from this server and returns you to
+                        the start screen. You will need to import it again.
+                      </p>
+                      <button
+                        ref={confirmYesRef}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setConfirming(null);
+                          remove.mutate();
+                        }}
+                        disabled={remove.isPending}
+                        className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 hover:bg-red-500/20 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none disabled:opacity-50"
+                      >
+                        {remove.isPending ? "Removing…" : "Yes, remove"}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setConfirming(null)}
+                        className="px-3 py-2 rounded-lg border border-white/10 text-slate-300 hover:bg-white/5 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      ref={removeRef}
+                      type="button"
+                      role="menuitem"
+                      disabled={paused}
+                      onClick={(event) => openConfirm("remove", event)}
+                      className="px-3 py-2 rounded-lg border border-transparent text-slate-300 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Remove playlist
+                    </button>
+                  )}
+                  {removeError && (
+                    <p role="alert" className="px-1 text-[11px] leading-relaxed text-red-300">
+                      {removeError.message}
+                    </p>
+                  )}
+                </>
+              )}
+
               {needsCode && configured && (
                 <>
-                  {confirmingDisconnect ? (
+                  {confirming === "disconnect" ? (
                     <div className="flex flex-col gap-2" role="none">
                       <p className="text-[11px] leading-relaxed text-slate-300">
                         Disconnecting removes the saved playlist code from this server. You will need
@@ -283,7 +387,7 @@ export default function AccountMenu() {
                         type="button"
                         role="menuitem"
                         onClick={() => {
-                          setConfirmingDisconnect(false);
+                          setConfirming(null);
                           clear.mutate();
                         }}
                         disabled={clear.isPending}
@@ -294,7 +398,7 @@ export default function AccountMenu() {
                       <button
                         type="button"
                         role="menuitem"
-                        onClick={() => setConfirmingDisconnect(false)}
+                        onClick={() => setConfirming(null)}
                         className="px-3 py-2 rounded-lg border border-white/10 text-slate-300 hover:bg-white/5 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none"
                       >
                         Cancel
@@ -305,7 +409,7 @@ export default function AccountMenu() {
                       ref={disconnectRef}
                       type="button"
                       role="menuitem"
-                      onClick={() => setConfirmingDisconnect(true)}
+                      onClick={(event) => openConfirm("disconnect", event)}
                       className="px-3 py-2 rounded-lg border border-transparent text-slate-300 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none"
                     >
                       <LogOut className="w-3.5 h-3.5" />

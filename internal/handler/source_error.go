@@ -36,9 +36,6 @@ const (
 	// distinct from playlist_rejected, which means a code was supplied and
 	// refused.
 	codePlaylistCodeRequired = "playlist_code_required"
-	// codePlaylistCodeNotSupported is returned by the playlist-code endpoint
-	// when the active source takes no playlist code at all.
-	codePlaylistCodeNotSupported = "playlist_code_not_supported"
 	// codeSourceNotConfigured is the "no source chosen yet" state. Every content
 	// route answers with it until the user picks one of the two real modes, so
 	// the client shows the choice rather than an empty library. It is distinct
@@ -92,10 +89,9 @@ const (
 func sourceErrorStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, source.ErrNotConfigured):
-		// No source has been chosen yet. 409, in the same family as
-		// playlist_code_not_supported: the request conflicts with the current
-		// state and a human must pick a mode before it can succeed. Not a 5xx,
-		// which would look like our fault and invite retry churn.
+		// No source has been chosen yet. 409: the request conflicts with the
+		// current state and a human must pick a mode before it can succeed. Not
+		// a 5xx, which would look like our fault and invite retry churn.
 		return http.StatusConflict, codeSourceNotConfigured
 	case errors.Is(err, adobotvhttp.ErrDevicePending):
 		return http.StatusForbidden, codeDevicePending

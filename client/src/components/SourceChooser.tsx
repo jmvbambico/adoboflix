@@ -46,6 +46,9 @@ export default function SourceChooser({ status, onLogin, onImport }: SourceChoos
           AdoboFlix needs a content source before it can show your library. Connect an AdoboTV
           account, or play a playlist you already have.
         </p>
+        <p className="text-xs font-medium text-orange-300/90">
+          An AdoboTV account is optional — either path is a first-class way to use AdoboFlix.
+        </p>
       </div>
 
       {pinned && (

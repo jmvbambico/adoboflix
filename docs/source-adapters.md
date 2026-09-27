@@ -458,9 +458,10 @@ The active source sits behind an atomic pointer. Reads are hot and swaps are
 rare, so the load path is a single atomic operation with no lock, and an
 in-flight request keeps whichever source it loaded — a swap can never race it.
 `PlayerHandler` reads the source only through one accessor, so a swap reaches
-every content route at once. Entering a code is the only thing that swaps; when
-the active source takes no playlist code (`file`, `postgres-direct`), `POST`
-answers `409 playlist_code_not_supported` and nothing is swapped.
+every content route at once. Entering a code is the only thing that swaps: the
+code implies the `adobotv-http` mode, so `POST /source/playlist-code` validates
+it against AdoboTV and then persists and swaps, whatever source was active
+before. Importing a playlist likewise selects the `file` mode.
 
 ### The credential is write-only
 

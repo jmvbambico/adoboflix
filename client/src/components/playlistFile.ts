@@ -5,7 +5,12 @@
 
 import { useCallback, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { importPlaylistFile, isApiError, type SourceStatus } from "../api/client";
+import {
+  clearPlaylistFile,
+  importPlaylistFile,
+  isApiError,
+  type SourceStatus,
+} from "../api/client";
 import { describeSourceError, type SourceStatusCopy } from "./sourceStatus";
 import { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
 
@@ -61,5 +66,23 @@ export function usePlaylistFileController() {
     [submit],
   );
 
-  return { outcome, isPending: submit.isPending, importFile };
+  // remove deletes the imported playlist. When it was the active source the
+  // server returns to the sourceless state, so the reply reports active:false;
+  // writing it in and invalidating drops the library and brings the chooser
+  // back with no reload.
+  const remove = useMutation<SourceStatus, unknown, void>({
+    mutationFn: () => clearPlaylistFile(),
+    onSuccess: (status) => {
+      queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, status);
+      queryClient.invalidateQueries();
+    },
+  });
+
+  return {
+    outcome,
+    isPending: submit.isPending,
+    importFile,
+    remove,
+    removeError: remove.isError ? describeSourceError(remove.error) : null,
+  };
 }

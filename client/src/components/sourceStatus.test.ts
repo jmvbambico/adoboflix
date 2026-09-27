@@ -10,7 +10,6 @@ import {
 // test rather than silently falling through to the generic copy.
 const MAPPED: Array<{ code: string; severity: SourceStatusSeverity; title: string }> = [
   { code: "playlist_code_required", severity: "action", title: "This player needs a playlist code" },
-  { code: "playlist_code_not_supported", severity: "blocked", title: "This source has no playlist code" },
   { code: "source_not_configured", severity: "action", title: "No source is connected yet" },
   { code: "source_pinned_by_env", severity: "blocked", title: "The source is pinned by configuration" },
   { code: "invalid_playlist", severity: "blocked", title: "That playlist could not be read" },

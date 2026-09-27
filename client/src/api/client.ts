@@ -334,6 +334,13 @@ export function importPlaylistFile(content: string): Promise<SourceStatus> {
   return sendRaw<SourceStatus>("POST", `${API_BASE}/source/playlist-file`, content);
 }
 
+// Remove the imported playlist. If it was the active source the server also
+// clears the remembered mode and returns to the sourceless state the UI offers
+// its choices from, so the reply reports active:false and the chooser returns.
+export function clearPlaylistFile(): Promise<SourceStatus> {
+  return sendJSON<SourceStatus>("DELETE", `${API_BASE}/source/playlist-file`);
+}
+
 // ── IPTV Channel API ───────────────────────────────────────────────
 
 export interface BackendChannel {

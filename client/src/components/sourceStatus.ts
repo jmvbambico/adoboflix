@@ -29,16 +29,6 @@ const COPY: Record<string, SourceStatusCopy> = {
     hint: "You can do this right now — no restart or reinstall needed.",
     retryLabel: "Enter playlist code",
   },
-  // Not the user's to fix by typing: the running source takes no code at all,
-  // which is a choice made by whoever configured AdoboFlix.
-  playlist_code_not_supported: {
-    severity: "blocked",
-    title: "This source has no playlist code",
-    message:
-      "The active AdoboFlix source does not take a playlist code, so there is nothing to enter. AdoboFlix is configured to read a local file or the development database directly.",
-    hint: "Switch the AdoboFlix source to adobotv-http, then reload.",
-    retryLabel: "Reload",
-  },
   // The sourceless first-run state: no source has been chosen, so every content
   // route answers with this. It is cleared in this session by choosing one of
   // the two options on the start screen — hence actionable, not an error.
