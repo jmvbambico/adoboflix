@@ -296,16 +296,64 @@ DELETE /api/v1/source/playlist-code
 
 `POST` **validates before persisting**: it opens a candidate adapter and makes
 one cheap real call — the playlist envelope — so a wrong code fails here rather
-than on the user's first playback attempt. Only on success is the code written
-and the live adapter swapped; on any failure **nothing is written, nothing is
-swapped**, and the same gate code the rest of the API returns is returned:
-`playlist_rejected`, `device_pending`, `subscription_inactive`,
-`user_agent_rejected` and friends. The client already branches on those; no
-parallel vocabulary is introduced.
+than on the user's first playback attempt. Whether the code is *kept* is then
+decided by whether AdoboTV recognised it, not by whether the call merely
+succeeded: a gate that runs after the code is resolved keeps the code, and a
+rejection or an inconclusive failure writes nothing. See "Which failures keep
+the code" below. Either way the code itself is never echoed, and the same gate
+code the rest of the API returns is returned — `playlist_rejected`,
+`device_pending`, `subscription_inactive`, `user_agent_rejected` and friends.
+The client already branches on those; no parallel vocabulary is introduced.
 
 `DELETE` clears the stored code and reopens the adapter from what remains (the
 environment fallback, or the unconfigured state). Clearing nothing is not an
 error.
+
+### Which failures keep the code
+
+`POST` keeps the code when it has **proved itself valid** — when AdoboTV
+recognised it and gated access for some other reason — and drops it otherwise.
+That split exists so a first-time subscriber whose device is awaiting approval
+does not have to retype a correct code after the operator approves it. The
+question is not "did the call succeed" but "did the code identify the
+subscriber". When the code is kept the gate is still returned, so the client
+shows the right screen; reads fail with that gate until it clears, then start
+working with no further user action.
+
+| Validation failure | Code kept? | Why |
+|---|---|---|
+| (success) | yes | — |
+| `device_pending` | **yes** | the device gate runs *after* the code is resolved, so the code was accepted; it clears on operator approval with no re-entry. |
+| `subscription_inactive` | **yes** | the playlist endpoint admits inactive/expired accounts, so the refusal is the account state, not the code. |
+| `playlist_format_m3u` | **yes** | the endpoint answered with this account's own playlist, so the code was accepted; the m3u format is an upstream account setting. |
+| `content_token_rejected` | **yes** | the playlist was served (the code was accepted) and only a minted token lapsed. |
+| `content_not_found` | **yes** | the playlist was served; only a specific item was missing. |
+| `playlist_rejected` | no | the code itself was refused. |
+| `user_agent_rejected` | no (ambiguous) | it is unclear whether the allowlist is checked before or after the code lookup, so it does not reliably prove the code valid; its remedy is a UA change, not re-entry. |
+| `malformed_playlist`, `malformed_drm`, `malformed_vod_library` | no | an unparseable 2xx body proves nothing about the code. |
+| `upstream_error` | no | an unreachable or failing upstream has said nothing about the code. |
+| `playlist_code_required`, anything unknown | no | default: when in doubt, do not persist. A code the user must re-enter is a smaller harm than a bad code sticking and failing every later request. |
+
+Only success and the `device_pending`, `subscription_inactive`,
+`playlist_rejected`, `user_agent_rejected`, `playlist_format_m3u`,
+`malformed_playlist` and `upstream_error` failures are reachable through the
+current validation call (a single playlist-envelope fetch). The rest are
+classified anyway so the rule is complete and survives a change to what
+validation exercises.
+
+### Known limits
+
+- **A swap does not refresh the health-scan manager.** `scanManager` builds its
+  `scanner.Manager` once under a `sync.Once`, from the source that was active at
+  the first scan, so a later playlist-code swap leaves it pointing at the
+  previous adapter. That is currently harmless: `adobotv-http` is not a
+  `StreamProbeLister`, so a scan against it is unsupported either way and no
+  manager is ever built for it, while the sources that *are* probe-listable
+  (`file`, `postgres-direct`) take no playlist code and never swap. Whoever makes
+  `adobotv-http` probe-listable must refresh the manager on swap first,
+  otherwise a scan would run against a stale credential.
+
+### The credential is write-only
 
 ### How the swap is guarded
 

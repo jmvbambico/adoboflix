@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -184,33 +185,46 @@ func TestSetPlaylistCodeRejectedPersistsNothingAndSwapsNothing(t *testing.T) {
 	}
 }
 
-// Every validation failure maps to the one gate code the rest of the API uses,
-// and none of them persists or swaps.
-func TestSetPlaylistCodeValidationFailuresMapToGateCodes(t *testing.T) {
+// One case per classification decision: the HTTP status and gate code the
+// client sees, AND whether the code was kept and the source swapped. Each case
+// asserts the file's existence and contents explicitly, so a change to the
+// response body alone cannot make it pass.
+func TestSetPlaylistCodePersistenceClassification(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	const code = "SUBMITTED-CODE"
+
 	cases := []struct {
 		name     string
 		err      error
 		wantHTTP int
 		wantCode string
+		persist  bool
 	}{
-		{"rejected", fmt.Errorf("%w: 403", adobotvhttp.ErrPlaylistRejected), http.StatusForbidden, codePlaylistRejected},
-		{"device pending", fmt.Errorf("%w: splash", adobotvhttp.ErrDevicePending), http.StatusForbidden, codeDevicePending},
-		{"subscription inactive", fmt.Errorf("%w: not active", adobotvhttp.ErrSubscriptionInactive), http.StatusForbidden, codeSubscriptionInactive},
-		{"user agent rejected", fmt.Errorf("%w: prefix", adobotvhttp.ErrUserAgentRejected), http.StatusForbidden, codeUserAgentRejected},
-		{"no code configured", fmt.Errorf("%w: none", adobotvhttp.ErrNoPlaylistCode), http.StatusForbidden, codePlaylistCodeRequired},
-		{"upstream", fmt.Errorf("%w: refused", adobotvhttp.ErrUpstream), http.StatusBadGateway, codeUpstreamError},
+		// The code proved itself valid; the gate is something other than the code.
+		{"device pending", fmt.Errorf("%w: splash", adobotvhttp.ErrDevicePending), http.StatusForbidden, codeDevicePending, true},
+		{"subscription inactive", fmt.Errorf("%w: not active", adobotvhttp.ErrSubscriptionInactive), http.StatusForbidden, codeSubscriptionInactive, true},
+		{"playlist format m3u", fmt.Errorf("%w: KODIPROP", adobotvhttp.ErrPlaylistFormatM3U), http.StatusBadGateway, codePlaylistFormatM3U, true},
+		{"content token rejected", fmt.Errorf("%w: dead token", adobotvhttp.ErrTokenRejected), http.StatusBadGateway, codeTokenRejected, true},
+		{"content not found", fmt.Errorf("%w: no item", adobotvhttp.ErrContentNotFound), http.StatusNotFound, codeContentNotFound, true},
+
+		// The code is bad, or the failure told us nothing reliable about it.
+		{"playlist rejected", fmt.Errorf("%w: 403", adobotvhttp.ErrPlaylistRejected), http.StatusForbidden, codePlaylistRejected, false},
+		{"user agent rejected is ambiguous", fmt.Errorf("%w: prefix", adobotvhttp.ErrUserAgentRejected), http.StatusForbidden, codeUserAgentRejected, false},
+		{"no code configured", fmt.Errorf("%w: none", adobotvhttp.ErrNoPlaylistCode), http.StatusForbidden, codePlaylistCodeRequired, false},
+		{"malformed playlist", fmt.Errorf("%w: not json", adobotvhttp.ErrMalformedEnvelope), http.StatusBadGateway, codeMalformedPlaylist, false},
+		{"malformed drm", fmt.Errorf("%w: not base64", adobotvhttp.ErrMalformedDRM), http.StatusBadGateway, codeMalformedDRM, false},
+		{"malformed vod library", fmt.Errorf("%w: not an array", adobotvhttp.ErrMalformedVODLibrary), http.StatusBadGateway, codeMalformedVODLibrary, false},
+		{"upstream", fmt.Errorf("%w: refused", adobotvhttp.ErrUpstream), http.StatusBadGateway, codeUpstreamError, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			h, player, store := newTestSourceHandler(t, source.Config{Name: adobotvhttp.Name}, "")
 			before := player.src()
-			h.open = func(source.Config) (source.Source, error) {
-				return &codeStubSource{name: "candidate", listErr: tc.err}, nil
-			}
+			candidate := &codeStubSource{name: "candidate", listErr: tc.err}
+			h.open = func(source.Config) (source.Source, error) { return candidate, nil }
 
-			w := doJSON(t, sourceControlRouter(h), http.MethodPost, "/api/v1/source/playlist-code", `{"code":"SOME-CODE"}`)
+			w := doJSON(t, sourceControlRouter(h), http.MethodPost, "/api/v1/source/playlist-code", `{"code":"`+code+`"}`)
 			if w.Code != tc.wantHTTP {
 				t.Fatalf("status = %d, want %d", w.Code, tc.wantHTTP)
 			}
@@ -223,13 +237,80 @@ func TestSetPlaylistCodeValidationFailuresMapToGateCodes(t *testing.T) {
 			if got.Code != tc.wantCode {
 				t.Errorf("code = %q, want %q", got.Code, tc.wantCode)
 			}
-			if _, ok, err := store.Load(); err != nil || ok {
-				t.Errorf("store = (ok=%v, err=%v), want nothing persisted", ok, err)
-			}
-			if player.src() != before {
-				t.Error("a validation failure swapped the live source; it must not")
+
+			stored, ok, err := store.Load()
+			if tc.persist {
+				if err != nil || !ok || stored != code {
+					t.Fatalf("store = (%q, ok=%v, err=%v), want the code persisted", stored, ok, err)
+				}
+				if player.src() != source.Source(candidate) {
+					t.Error("the code was kept but the source was not swapped to the candidate")
+				}
+			} else {
+				if err != nil || ok {
+					t.Errorf("store = (ok=%v, err=%v), want nothing persisted", ok, err)
+				}
+				if _, statErr := os.Stat(store.Path()); !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("a file exists at %s, want none", store.Path())
+				}
+				if player.src() != before {
+					t.Error("the source was swapped despite the code not being kept")
+				}
 			}
 		})
+	}
+}
+
+// A device-pending code is persisted and swapped in, and reads from the swapped
+// source still report the gate until the device is approved — the point being
+// that the user never retypes the code.
+func TestSetPlaylistCodeDevicePendingPersistsAndStaysGated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const code = "CODE-WITH-PENDING-DEVICE"
+
+	h, player, store := newTestSourceHandler(t, source.Config{Name: adobotvhttp.Name}, "")
+	candidate := &codeStubSource{name: "candidate", listErr: fmt.Errorf("%w: splash", adobotvhttp.ErrDevicePending)}
+	h.open = func(source.Config) (source.Source, error) { return candidate, nil }
+
+	r := gin.New()
+	r.POST("/api/v1/source/playlist-code", h.SetPlaylistCode)
+	r.GET("/api/v1/channels", player.ListChannels)
+
+	w := doJSON(t, r, http.MethodPost, "/api/v1/source/playlist-code", `{"code":"`+code+`"}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want 403", w.Code)
+	}
+	var post struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &post); err != nil {
+		t.Fatalf("decode POST body: %v", err)
+	}
+	if post.Code != codeDevicePending {
+		t.Errorf("POST code = %q, want %q", post.Code, codeDevicePending)
+	}
+	// The file was written and holds exactly the submitted code.
+	stored, ok, err := store.Load()
+	if err != nil || !ok || stored != code {
+		t.Fatalf("store = (%q, ok=%v, err=%v), want the code persisted", stored, ok, err)
+	}
+	if player.src() != source.Source(candidate) {
+		t.Fatal("the source was not swapped to the device-pending candidate")
+	}
+
+	// A later read runs against the swapped source and still reports the gate.
+	w2 := doJSON(t, r, http.MethodGet, "/api/v1/channels", "")
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("channels status = %d, want 403", w2.Code)
+	}
+	var get struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(w2.Body.Bytes(), &get); err != nil {
+		t.Fatalf("decode channels body: %v", err)
+	}
+	if get.Code != codeDevicePending {
+		t.Errorf("channels code = %q, want %q from the swapped source", get.Code, codeDevicePending)
 	}
 }
 

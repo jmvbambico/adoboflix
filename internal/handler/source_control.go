@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/playlistcode"
 	"github.com/jmvbambico/adoboflix/internal/source"
+	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 )
 
 // SourceHandler serves the playlist-code entry endpoints. They let a subscriber
@@ -108,8 +110,13 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 		})
 		return
 	}
-	if err := validatePlaylistCode(candidate); err != nil {
-		writeSourceError(c, err, "")
+	// Validate before persisting or swapping: a wrong code must fail here, not
+	// on the user's first playback attempt. Whether the code is *kept* is a
+	// separate question — not "did the call succeed" but "did AdoboTV recognise
+	// the code". See playlistCodeProvenValid.
+	validationErr := validatePlaylistCode(candidate)
+	if validationErr != nil && !playlistCodeProvenValid(validationErr) {
+		writeSourceError(c, validationErr, "")
 		return
 	}
 
@@ -124,6 +131,16 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 	h.player.SwapSource(candidate)
 	// Log the length only: the code itself must never reach the log.
 	log.Printf("[source] playlist code entered for %q; source reopened (%d characters)", h.cfg.Name, len(code))
+
+	if validationErr != nil {
+		// The code identified the subscriber; the gate is something other than
+		// the code (a device awaiting approval, a lapsed subscription). The code
+		// is kept so the user does not have to retype it, and the gate is still
+		// reported so the client shows the right screen. Reads fail with that
+		// gate until it clears, then start working with no further action.
+		writeSourceError(c, validationErr, "")
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"source":                   h.cfg.Name,
@@ -214,4 +231,55 @@ func (h *SourceHandler) configWith(code string) source.Config {
 func validatePlaylistCode(candidate source.Source) error {
 	_, _, err := candidate.ListChannels("", 1, 0)
 	return err
+}
+
+// playlistCodeProvenValid reports whether a validation error still proves the
+// submitted code itself valid. That, not "did the call succeed", is what
+// decides whether the code is kept.
+//
+// The distinction is where in AdoboTV's gate order the failure sits. A gate
+// that runs only after the code has been resolved — a device awaiting
+// approval, a lapsed subscription — means AdoboTV recognised the code and
+// identified the subscriber, and the gate clears later without the user
+// retyping anything, so the code is worth keeping. A rejection, an
+// unparseable 2xx, or a transport failure has told us nothing reliable about
+// the code (or told us it is bad), so nothing is persisted. When it is
+// genuinely ambiguous, the default is NOT to persist: making the user re-enter
+// a code is a smaller harm than a bad code sticking and failing every later
+// request.
+//
+// Only a few of these are reachable through the current validation call, which
+// is a single playlist-envelope fetch. The rest are classified anyway so the
+// rule is complete and survives a future change to what validation exercises.
+func playlistCodeProvenValid(err error) bool {
+	switch {
+	case errors.Is(err, adobotvhttp.ErrDevicePending):
+		// The device gate runs after the code is resolved: AdoboTV served the
+		// splash for a code it accepted. Clears on operator approval.
+		return true
+	case errors.Is(err, adobotvhttp.ErrSubscriptionInactive):
+		// The playlist endpoint admits inactive/expired accounts, so a refusal
+		// here is the account state, not the code; the code identified the
+		// subscriber.
+		return true
+	case errors.Is(err, adobotvhttp.ErrPlaylistFormatM3U):
+		// The endpoint answered with this account's own playlist, so the code
+		// was accepted; the m3u output format is an upstream account setting.
+		return true
+	case errors.Is(err, adobotvhttp.ErrTokenRejected):
+		// The playlist was served (the code was accepted) and only a token
+		// minted with it lapsed; the next fetch mints a fresh one.
+		return true
+	case errors.Is(err, adobotvhttp.ErrContentNotFound):
+		// The playlist was served; only a specific item was missing.
+		return true
+	default:
+		// playlist_rejected (the code itself was refused), user_agent_rejected
+		// (it is unclear whether the allowlist is checked before the code
+		// lookup, so it does not reliably prove the code valid — and its remedy
+		// is a client-config change, not re-entry), the malformed-* cases (an
+		// unparseable body proves nothing), upstream_error (an unreachable or
+		// failing upstream said nothing), and anything unknown.
+		return false
+	}
 }
