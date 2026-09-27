@@ -185,6 +185,20 @@ func (a *Adapter) cachedVOD() []vodAsset {
 	return a.vod
 }
 
+// invalidateCache drops the cached envelope and VOD library so the next read
+// refetches from upstream. It is called when AdoboTV rejects a content token
+// that the cached envelope minted: the tokenized URLs in that envelope are all
+// dead, and keeping them would re-send the same token until the TTL lapsed. The
+// next fetch mints a fresh token.
+func (a *Adapter) invalidateCache() {
+	a.mu.Lock()
+	a.env = nil
+	a.envAt = time.Time{}
+	a.vod = nil
+	a.vodAt = time.Time{}
+	a.mu.Unlock()
+}
+
 // --- VOD (Source) -----------------------------------------------------------
 
 func (a *Adapter) GetStats() (*source.Stats, error) {
@@ -390,7 +404,7 @@ func (a *Adapter) channels(ctx context.Context) ([]channelView, error) {
 			display = cat.Name
 		}
 		channel := source.Channel{
-			ID:       channelID(ch.Name, ch.EpgID),
+			ID:       channelID(ch.Name, ch.EpgID, ch.Category),
 			Name:     ch.Name,
 			Category: stringPtr(display),
 			Status:   "active",
@@ -527,6 +541,9 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 		return nil, "", err
 	}
 	if status < 200 || status >= 300 {
+		if err := a.gateError(body); err != nil {
+			return nil, "", err
+		}
 		return nil, "", upstreamError(status, body)
 	}
 	sum := sha256.Sum256(body)

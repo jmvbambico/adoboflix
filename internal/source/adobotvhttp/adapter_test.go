@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,4 +389,94 @@ func channelByName(t *testing.T, channels []source.Channel, name string) source.
 	}
 	t.Fatalf("channel %q not found in %+v", name, channels)
 	return source.Channel{}
+}
+
+// Two channels that share a name and epg_id but differ by category must not
+// collide: including the category is what stops the second being shadowed.
+func TestChannelIDIncludesCategory(t *testing.T) {
+	a := channelID("Same Name", "same.tvg", "movies")
+	b := channelID("Same Name", "same.tvg", "news")
+	if a == b {
+		t.Fatalf("channelID ignored the category: both ids are %q", a)
+	}
+}
+
+// Concurrent readers that all miss the cache must collapse onto ONE upstream
+// fetch: fetchMu is held across the fetch and the cache is re-checked inside the
+// lock, so the waiters return the first fetch's result instead of stampeding.
+func TestConcurrentCacheMissesCollapseToOneFetch(t *testing.T) {
+	var playlistHits atomic.Int32
+	inner := libraryHandler(t, nil, standardDRM(), nil)
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/playlist/") {
+			playlistHits.Add(1)
+			// Widen the window so every goroutine has time to miss the cold
+			// cache and pile up on fetchMu.
+			time.Sleep(20 * time.Millisecond)
+		}
+		inner(w, r)
+	}
+
+	adapter, _ := newTestServer(t, time.Minute, handler)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, _, err := adapter.ListChannels("", 100, 0); err != nil {
+				t.Errorf("ListChannels: %v", err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := playlistHits.Load(); got != 1 {
+		t.Errorf("playlist fetched %d times, want exactly 1 (concurrent misses must collapse)", got)
+	}
+}
+
+// A rejected content token must drop the cached envelope so the next read
+// refetches and mints a fresh token, instead of re-sending the dead one until
+// the TTL lapses. It also surfaces as its own sentinel, not the generic
+// upstream error a dead token would otherwise look like.
+func TestTokenRejectionInvalidatesCacheAndRefetches(t *testing.T) {
+	var playlistHits atomic.Int32
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/playlist/"+testPlaylistCode {
+			playlistHits.Add(1)
+			writeBody(w, http.StatusOK, "application/json", string(envelopeBody(t, r, nil)))
+			return
+		}
+		// A token message that also says "expired" — the token branch must win
+		// over the subscription branch.
+		writeErrorEnvelope(w, http.StatusForbidden, "Invalid or expired content token")
+	}
+
+	adapter, srv := newTestServer(t, time.Minute, handler)
+
+	if _, _, err := adapter.ListChannels("", 100, 0); err != nil {
+		t.Fatalf("ListChannels: %v", err)
+	}
+	if got := playlistHits.Load(); got != 1 {
+		t.Fatalf("playlist fetched %d times before the rejection, want 1", got)
+	}
+
+	_, err := adapter.resolveRuntimeAttr(context.Background(), srv.URL+"/v1/drm/key/ch-alpha?token="+testToken)
+	if !errors.Is(err, ErrTokenRejected) {
+		t.Fatalf("error = %v, want it to wrap ErrTokenRejected", err)
+	}
+	if errors.Is(err, ErrSubscriptionInactive) {
+		t.Errorf("token rejection misfiled as a subscription problem: %v", err)
+	}
+
+	if _, _, err := adapter.ListChannels("", 100, 0); err != nil {
+		t.Fatalf("ListChannels after rejection: %v", err)
+	}
+	if got := playlistHits.Load(); got != 2 {
+		t.Errorf("playlist fetched %d times, want 2 (cache invalidated on token rejection)", got)
+	}
 }

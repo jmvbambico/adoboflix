@@ -61,14 +61,10 @@ func (a *Adapter) fetchVODLibrary(ctx context.Context, env *envelope) ([]vodAsse
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		detail := upstreamMessage(body)
-		lower := strings.ToLower(detail)
-		switch {
-		case strings.Contains(lower, "not active"):
-			return nil, subscriptionInactiveError(detail)
-		default:
-			return nil, upstreamError(status, body)
+		if err := a.gateError(body); err != nil {
+			return nil, err
 		}
+		return nil, upstreamError(status, body)
 	}
 
 	// The library is a flat JSON array. A non-array body (for example the

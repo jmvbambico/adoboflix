@@ -21,6 +21,7 @@ const (
 	codePlaylistFormatM3U    = "playlist_format_m3u"
 	codeContentNotFound      = "content_not_found"
 	codeNotFound             = "not_found"
+	codeTokenRejected        = "content_token_rejected"
 	codeMalformedPlaylist    = "malformed_playlist"
 	codeMalformedDRM         = "malformed_drm"
 	codeMalformedVODLibrary  = "malformed_vod_library"
@@ -83,6 +84,8 @@ func sourceErrorStatus(err error) (int, string) {
 		return http.StatusBadGateway, codeMalformedDRM
 	case errors.Is(err, adobotvhttp.ErrMalformedVODLibrary):
 		return http.StatusBadGateway, codeMalformedVODLibrary
+	case errors.Is(err, adobotvhttp.ErrTokenRejected):
+		return http.StatusBadGateway, codeTokenRejected
 	case errors.Is(err, adobotvhttp.ErrUpstream):
 		return http.StatusBadGateway, codeUpstreamError
 	default:

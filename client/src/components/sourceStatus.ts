@@ -56,6 +56,14 @@ const COPY: Record<string, SourceStatusCopy> = {
     hint: "Ask the AdoboTV operator to switch this playlist's output format back to JSON.",
     retryLabel: "Retry",
   },
+  content_token_rejected: {
+    severity: "upstream",
+    title: "AdoboTV rejected a content token",
+    message:
+      "The content token AdoboTV minted with this playlist was refused. AdoboFlix drops the cached playlist and fetches a fresh token on the next request.",
+    hint: "Retry; if it keeps happening, contact the AdoboTV operator.",
+    retryLabel: "Retry",
+  },
   malformed_playlist: {
     severity: "upstream",
     title: "AdoboTV sent a malformed playlist",

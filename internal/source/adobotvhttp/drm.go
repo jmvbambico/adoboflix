@@ -48,18 +48,10 @@ func (a *Adapter) resolveRuntimeAttr(ctx context.Context, runtimeAttrURL string)
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
-		detail := upstreamMessage(body)
-		lower := strings.ToLower(detail)
-		switch {
-		case strings.Contains(lower, "not active"):
-			return nil, subscriptionInactiveError(detail)
-		case strings.Contains(lower, "not approved"), strings.Contains(lower, "device"):
-			return nil, devicePendingDetail(detail)
-		case strings.Contains(lower, "token"):
-			return nil, fmt.Errorf("%w: content token rejected: %s; refetch the playlist", ErrUpstream, detail)
-		default:
-			return nil, upstreamError(status, body)
+		if err := a.gateError(body); err != nil {
+			return nil, err
 		}
+		return nil, upstreamError(status, body)
 	}
 
 	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
@@ -89,8 +81,13 @@ func (a *Adapter) resolveRuntimeAttr(ctx context.Context, runtimeAttrURL string)
 //   - when drm_type is a real DRM tech, drm_key is the ClearKey key for
 //     clearkey and the license URL for everything else: one field, two
 //     meanings.
-//   - if drm_type means no DRM but drm_key is populated, it is a "user:pass"
-//     pair AdoboTV moved out of a .mpd URL's userinfo when no license existed.
+//   - if drm_type means no DRM but drm_key is populated, it is either a
+//     "user:pass" pair AdoboTV moved out of a .mpd URL's userinfo, or a
+//     ClearKey "kid:key" pair under a drm_type upstream mislabelled. The two
+//     are told apart by evidence (hex halves vs free-form), never by
+//     punctuation, and an ambiguous value is kept as a DRM key: losing a key
+//     breaks playback silently, whereas a missing userinfo produces a visible
+//     auth error.
 //
 // DRM tech names are canonicalised to the capitalised forms the player matches
 // on ("Clearkey", "Widevine"), because upstream lowercases them.
@@ -106,49 +103,78 @@ func applyDRM(d drmDetails) *resolvedStream {
 	}
 
 	drmType := strings.ToLower(strings.TrimSpace(d.DrmType))
+	key := strings.TrimSpace(d.DrmKey)
 	if drmType == "" || drmType == "m3u" {
-		if creds, ok := userInfoCredentials(d.DrmKey, d.URL); ok {
-			rs.URL = injectUserInfo(d.URL, creds)
+		switch {
+		case key == "":
+			// No DRM and nothing moved out of the URL.
+		case clearKeyPair(key):
+			// drm_type says "no DRM" but drm_key carries a ClearKey pair.
+			// Protect the key: it is the decryption key, not URL credentials.
+			canonical := "Clearkey"
+			rs.DrmType = &canonical
+			k := key
+			rs.DrmK = &k
+		case userInfoCredentials(key):
+			rs.URL = injectUserInfo(d.URL, key)
 		}
 		return rs
 	}
 
 	canonical := canonicalDRMType(drmType)
 	rs.DrmType = &canonical
-	if d.DrmKey != "" {
+	if key != "" {
 		if drmType == "clearkey" {
-			key := d.DrmKey
-			rs.DrmK = &key
+			k := key
+			rs.DrmK = &k
 		} else {
-			license := d.DrmKey
+			license := key
 			rs.LicenseURL = &license
 		}
 	}
 	return rs
 }
 
-// userInfoCredentials reports whether drm_key is really a "user:pass" pair.
-// AdoboTV only produces this shape for a .mpd URL that carried userinfo and
-// had no license, so the .mpd suffix is required; this keeps a ClearKey
-// "kid:key" value (which has the same punctuation) from being mistaken for
-// credentials.
-func userInfoCredentials(drmKey, streamURL string) (string, bool) {
+// clearKeyPair reports whether drmKey is a ClearKey "kid:key" pair. Both halves
+// are hexadecimal; AdoboTV emits 32 hex characters per half. This is the
+// EVIDENCE that separates a key from "user:pass" — punctuation alone (one
+// colon, no slash, no '@') cannot, because a ClearKey pair has exactly the same
+// punctuation credentials do.
+func clearKeyPair(drmKey string) bool {
+	kid, key, ok := strings.Cut(drmKey, ":")
+	if !ok || kid == "" || key == "" || strings.Contains(key, ":") {
+		return false
+	}
+	return isHex(kid) && isHex(key)
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// userInfoCredentials reports whether drm_key is a "user:pass" pair AdoboTV
+// moved out of a stream URL's userinfo. A ClearKey pair is excluded: it has the
+// same punctuation but is a decryption key, and the caller protects it. Every
+// value legal in HTTP Basic credentials is accepted — the password may contain
+// further colons, slashes or '@' — and no ".mpd" suffix is required, because a
+// DASH manifest endpoint may be "/dash/live" or carry parameters.
+func userInfoCredentials(drmKey string) bool {
 	key := strings.TrimSpace(drmKey)
-	if key == "" || strings.Contains(key, "://") || strings.ContainsAny(key, "/@") {
-		return "", false
+	if key == "" || strings.Contains(key, "://") || strings.ContainsAny(key, " \t\r\n") {
+		return false
 	}
-	if strings.Count(key, ":") != 1 {
-		return "", false
+	if clearKeyPair(key) {
+		return false
 	}
-	u, p, ok := strings.Cut(key, ":")
-	if !ok || u == "" || p == "" {
-		return "", false
-	}
-	parsed, err := url.Parse(streamURL)
-	if err != nil || !strings.HasSuffix(parsed.Path, ".mpd") {
-		return "", false
-	}
-	return key, true
+	user, pass, ok := strings.Cut(key, ":")
+	return ok && user != "" && pass != ""
 }
 
 // injectUserInfo re-embeds credentials into a stream URL as userinfo so the

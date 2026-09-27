@@ -18,8 +18,12 @@ import (
 // those methods recompute the same function and compare.
 const idHexLen = 32 // 128 bits
 
-func channelID(name, epgID string) string {
-	return "ch-" + hashParts("channel", name, epgID)
+// channelID derives a channel id from every stable identifying field, including
+// category: two channels that share a name and epg_id but sit in different
+// categories are distinct, and omitting the category would let the second be
+// permanently shadowed by the first.
+func channelID(name, epgID, category string) string {
+	return "ch-" + hashParts("channel", name, epgID, category)
 }
 
 func vodAssetID(category, name string) string {
