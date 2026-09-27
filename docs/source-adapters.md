@@ -613,7 +613,7 @@ to report and logs none of this.
 
 #### Known limits
 
-The mapping is a heuristic and three things are known to be lossy. None is a bug
+The mapping is a heuristic and four things are known to be lossy. None is a bug
 to file:
 
 - **Two shows with the same name and no distinguishing metadata cannot be
@@ -628,6 +628,14 @@ to file:
 - **Prefixless titles with no usable `tvg-name` fall back to the group name**,
   so distinct shows in one group merge. The summary's `from group name` count
   measures how often this happened.
+- **A prefixless title whose `tvg-name` holds only an episode title splits one
+  series into one entry per episode.** `1x01` with `tvg-name="Pilot"` has no
+  season/episode marker in `tvg-name` to divide on, so the whole of it — the
+  episode's own name — becomes the series name, and the next episode's differs.
+  This is the narrow case where identity is genuinely absent from both fields
+  rather than merely ambiguous: tier 2 cannot tell an episode title from a
+  series title. Such a playlist reads as many one-episode series, which the
+  summary shows as a `from tvg-name` count close to the VOD row count.
 
 Widening the keyword list or letting configuration declare the mapping would
 help the second and third, but both are the owner's decision, not the adapter's
