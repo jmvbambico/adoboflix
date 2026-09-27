@@ -72,10 +72,11 @@ const minBilledTill = 1546300800 // 2019-01-01T00:00:00Z
 // StreamProbeLister; that omission is what keeps the optional capability
 // honest.
 var (
-	_ source.Source              = (*Adapter)(nil)
-	_ source.CompiledEPGProvider = (*Adapter)(nil)
-	_ source.AccountInfoProvider = (*Adapter)(nil)
-	_ source.SyncProvider        = (*Adapter)(nil)
+	_ source.Source               = (*Adapter)(nil)
+	_ source.CompiledEPGProvider  = (*Adapter)(nil)
+	_ source.AccountInfoProvider  = (*Adapter)(nil)
+	_ source.SyncProvider         = (*Adapter)(nil)
+	_ source.ContextChannelLister = (*Adapter)(nil)
 )
 
 func init() {
@@ -491,7 +492,19 @@ func (a *Adapter) channels(ctx context.Context) ([]channelView, error) {
 }
 
 func (a *Adapter) ListChannels(category string, limit, offset int) ([]source.Channel, int, error) {
-	views, err := a.channels(context.Background())
+	return a.listChannels(context.Background(), category, limit, offset)
+}
+
+// ListChannelsContext is ListChannels with a caller's context, so the fetch it
+// may trigger is cancelled when the context is. It is the optional
+// source.ContextChannelLister capability, used by the boot credential re-check
+// so a shutdown does not wait out an unreachable upstream's HTTP timeout.
+func (a *Adapter) ListChannelsContext(ctx context.Context, category string, limit, offset int) ([]source.Channel, int, error) {
+	return a.listChannels(ctx, category, limit, offset)
+}
+
+func (a *Adapter) listChannels(ctx context.Context, category string, limit, offset int) ([]source.Channel, int, error) {
+	views, err := a.channels(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

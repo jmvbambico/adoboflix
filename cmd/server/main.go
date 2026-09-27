@@ -312,9 +312,13 @@ func main() {
 	// The daily warm-up: when the calendar date changes, refresh the active
 	// source so the first page load of the day is served from a warm cache. A
 	// failure is logged and ignored — it is not an error state for the app.
+	// Supported gates the attempt on the source actually having something to
+	// sync, so an imported playlist or a sourceless server is not asked (and not
+	// logged as failing) once a day for a state that is entirely normal.
 	scheduler := autosync.New(time.Now, func(syncCtx context.Context) error {
 		return sourceHandler.SyncNow(syncCtx)
 	})
+	scheduler.Supported = sourceHandler.CanSync
 	bgWG.Add(1)
 	go func() {
 		defer bgWG.Done()
@@ -328,8 +332,11 @@ func main() {
 	// when no scan was ever requested — it never constructs the scan manager.
 	handler.CancelActiveScan()
 
-	// Stop the background re-check and scheduler and wait for them, so no
-	// goroutine outlives the process.
+	// Stop both background jobs and wait for them, so no goroutine outlives the
+	// process. Cancelling bgCtx reaches the re-check's upstream read through the
+	// context threaded into validatePlaylistCode, so an in-flight boot re-check
+	// against an unreachable AdoboTV is aborted rather than waited out; the
+	// scheduler returns from its select. bgWG.Wait() therefore returns promptly.
 	cancelBG()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

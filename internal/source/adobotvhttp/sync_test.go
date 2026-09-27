@@ -2,6 +2,7 @@ package adobotvhttp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -157,12 +158,57 @@ func TestRefreshFailureLeavesCacheIntact(t *testing.T) {
 	}
 }
 
-// The optional capability is present, and the sync it implies is honest: the
+// The optional capabilities are present, and the sync they imply is honest: the
 // returned Source interface still exposes no write path.
 func TestAdapterIsSyncProvider(t *testing.T) {
 	adapter, _ := newTestServer(t, time.Minute, libraryHandler(t, nil, standardDRM(), nil))
 	var asSource source.Source = adapter
 	if _, ok := asSource.(source.SyncProvider); !ok {
 		t.Error("adapter does not implement source.SyncProvider: it has an upstream library to refresh")
+	}
+	if _, ok := asSource.(source.ContextChannelLister); !ok {
+		t.Error("adapter does not implement source.ContextChannelLister: its fetch must be cancellable")
+	}
+}
+
+// ListChannelsContext carries the caller's context into the upstream request, so
+// cancelling it aborts an in-flight fetch. This is what stops a shutdown from
+// waiting out the adapter's HTTP timeout. The server blocks until the client
+// cancels, so the only ways this can pass are the context reaching the request
+// (the error returns) or the deadline firing (the test fails) — a
+// context-free fetch would hang here.
+func TestListChannelsContextCancelsInFlightFetch(t *testing.T) {
+	arrived := make(chan struct{})
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/playlist/") {
+			close(arrived)
+			<-r.Context().Done()
+			return
+		}
+		writeErrorEnvelope(w, http.StatusNotFound, "unexpected path")
+	}
+	adapter, _ := newSyncTestAdapter(t, time.Hour, time.Now, handler)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := adapter.ListChannelsContext(ctx, "", 1, 0)
+		errCh <- err
+	}()
+
+	<-arrived
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("a cancelled fetch returned nil, want an error")
+		}
+		if !errors.Is(err, ErrUpstream) {
+			t.Errorf("error = %v, want it to wrap ErrUpstream", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a cancelled fetch did not return: the context did not reach the request")
 	}
 }

@@ -3,6 +3,8 @@ package autosync
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -114,5 +116,102 @@ func TestMaybeSyncInertWithoutSyncFunc(t *testing.T) {
 	s := New(func() time.Time { return time.Now() }, nil)
 	if s.MaybeSync(context.Background(), time.Now().Add(24*time.Hour)) {
 		t.Error("MaybeSync with no sync func = true, want false")
+	}
+}
+
+// A source that cannot sync is not asked and not logged as failing. The day is
+// left unconsumed, so a user who switches to a syncable source mid-day still
+// gets that day's refresh.
+func TestMaybeSyncDoesNotAskASourceThatCannotSync(t *testing.T) {
+	start := time.Date(2026, 9, 27, 8, 0, 0, 0, time.UTC)
+	var calls int
+	s := New(func() time.Time { return start }, func(context.Context) error {
+		calls++
+		return nil
+	})
+	s.Supported = func() bool { return false }
+
+	day2 := start.Add(24 * time.Hour)
+	if s.MaybeSync(context.Background(), day2) {
+		t.Error("MaybeSync for a non-syncable source = true, want false")
+	}
+	if calls != 0 {
+		t.Fatalf("sync called %d times, want 0: a non-syncable source must not be asked", calls)
+	}
+
+	// Now it can sync: the same day's refresh still happens.
+	s.Supported = func() bool { return true }
+	if !s.MaybeSync(context.Background(), day2) {
+		t.Error("MaybeSync after the source became syncable = false, want true")
+	}
+	if calls != 1 {
+		t.Fatalf("sync called %d times, want 1", calls)
+	}
+}
+
+// RunTicks is the wiring that makes the daily refresh actually happen: a tick
+// that observes a date change must sync, and a tick on the same date must not.
+// The loop is driven by an explicit tick channel and an injected clock, so
+// nothing waits on real time; only the two waits below are deadlines, not
+// sleeps that the behaviour depends on.
+func TestRunTicksSyncsWhenTheDateChanges(t *testing.T) {
+	start := time.Date(2026, 9, 27, 23, 59, 0, 0, time.UTC)
+	// The clock is read by the RunTicks goroutine and written here, so it is
+	// guarded: the loop's date check and the test's advance must not race.
+	var mu sync.Mutex
+	now := start
+	setNow := func(at time.Time) {
+		mu.Lock()
+		now = at
+		mu.Unlock()
+	}
+	synced := make(chan struct{}, 4)
+	var calls atomic.Int32
+	s := New(func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}, func(context.Context) error {
+		calls.Add(1)
+		synced <- struct{}{}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	go func() {
+		s.RunTicks(ctx, ticks)
+		close(done)
+	}()
+
+	// A tick on the seeded date must not sync.
+	setNow(start)
+	ticks <- start
+	// A tick on a new date must sync.
+	next := start.Add(24 * time.Hour)
+	setNow(next)
+	ticks <- next
+
+	select {
+	case <-synced:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTicks did not sync when a tick changed the date")
+	}
+	// The loop is a single goroutine reading the channel in order, so by the
+	// time the second tick's sync is observed the first tick has already been
+	// processed. A count of exactly one therefore proves the same-date tick did
+	// not sync either.
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("ticks produced %d syncs, want 1 (the same-date tick must not sync)", got)
+	}
+
+	// Closing the tick channel stops the loop too, not only cancellation.
+	close(ticks)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunTicks did not return after its tick channel closed")
 	}
 }

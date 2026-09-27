@@ -273,8 +273,9 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 	// Validate before persisting or swapping: a wrong code must fail here, not
 	// on the user's first playback attempt. Whether the code is *kept* is a
 	// separate question — not "did the call succeed" but "did AdoboTV recognise
-	// the code". See playlistCodeProvenValid.
-	validationErr := validatePlaylistCode(candidate)
+	// the code". See playlistCodeProvenValid. The request's context bounds the
+	// upstream call, so a client that gives up cancels the validation with it.
+	validationErr := validatePlaylistCode(c.Request.Context(), candidate)
 	if validationErr != nil && !playlistCodeProvenValid(validationErr) {
 		writeSourceError(c, validationErr, "")
 		return
@@ -713,7 +714,7 @@ func (h *SourceHandler) RevalidateSession(ctx context.Context) SessionOutcome {
 		return SessionUnchanged
 	}
 
-	validationErr := validatePlaylistCode(candidate)
+	validationErr := validatePlaylistCode(ctx, candidate)
 	switch {
 	case validationErr == nil, playlistCodeProvenValid(validationErr):
 		// AdoboTV recognised the code. A gate outside the code's control (a
@@ -768,6 +769,22 @@ func (h *SourceHandler) endSession() {
 		}
 		h.player.SwapSource(reopened)
 	}
+}
+
+// CanSync reports whether the active source has an upstream library to refresh.
+// It is the capability check a caller makes BEFORE asking: the midnight
+// scheduler uses it so an imported playlist or a sourceless server is not asked
+// to sync at all, rather than being asked once a day and reported as failing.
+// The manual endpoint does not need it — a user's explicit request is answered
+// with ErrSyncUnsupported — but the background path must stay quiet about a
+// state that is entirely normal.
+func (h *SourceHandler) CanSync() bool {
+	src := h.player.src()
+	if src == nil {
+		return false
+	}
+	_, ok := src.(source.SyncProvider)
+	return ok
 }
 
 // SyncNow refreshes the active source's library ahead of use. It is the manual
@@ -1006,7 +1023,18 @@ func importRejectionMessage(err error, tempPath string, data []byte) string {
 // envelope: exactly one upstream request, against the endpoint that enforces
 // the code, device and User-Agent gates. Its error is returned unchanged, so
 // the caller maps it to the same stable code the rest of the API uses.
-func validatePlaylistCode(candidate source.Source) error {
+//
+// The context bounds that upstream request wherever the adapter supports it
+// (source.ContextChannelLister), so cancelling it aborts the fetch rather than
+// leaving the caller — a request handler or the boot re-check — waiting out the
+// adapter's HTTP timeout. A cancelled read surfaces as a transport failure,
+// which the classification reads as inconclusive: it neither confirms nor
+// rejects the code, so it never ends a session.
+func validatePlaylistCode(ctx context.Context, candidate source.Source) error {
+	if lister, ok := candidate.(source.ContextChannelLister); ok {
+		_, _, err := lister.ListChannelsContext(ctx, "", 1, 0)
+		return err
+	}
 	_, _, err := candidate.ListChannels("", 1, 0)
 	return err
 }

@@ -40,6 +40,12 @@ type Scheduler struct {
 	Interval time.Duration
 	// Sync refreshes the source. Nil makes the scheduler inert.
 	Sync func(ctx context.Context) error
+	// Supported reports whether the active source has anything to sync. When it
+	// is set and returns false the scheduler does not call Sync at all and does
+	// not consume the day, so an imported playlist or a sourceless server — both
+	// entirely normal — is never asked and never logged as a failure. Nil means
+	// "always supported".
+	Supported func() bool
 	// Logf reports a failed refresh. Nil means log.Printf.
 	Logf func(format string, args ...any)
 
@@ -78,6 +84,13 @@ func (s *Scheduler) MaybeSync(ctx context.Context, now time.Time) bool {
 	if s.Sync == nil {
 		return false
 	}
+	// Check the capability BEFORE recording the date, so a source that cannot
+	// sync is not asked now and is not skipped for the day either: if the user
+	// switches to a syncable source later the same day, that day's refresh still
+	// happens. This is "do not ask", not "ask quietly".
+	if s.Supported != nil && !s.Supported() {
+		return false
+	}
 	date := now.Format(dateLayout)
 
 	s.mu.Lock()
@@ -104,11 +117,24 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	s.RunTicks(ctx, ticker.C)
+}
+
+// RunTicks is Run's loop with its tick source supplied by the caller, so the
+// wiring from "a tick arrived" to "the date was re-checked and, if it changed,
+// the source synced" can be driven directly in a test rather than only by the
+// real ticker. Run passes a time.Ticker's channel; a test passes its own and
+// controls the injected clock, so nothing waits on real time. It returns when
+// ctx is cancelled or ticks is closed.
+func (s *Scheduler) RunTicks(ctx context.Context, ticks <-chan time.Time) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case _, ok := <-ticks:
+			if !ok {
+				return
+			}
 			s.MaybeSync(ctx, s.now())
 		}
 	}

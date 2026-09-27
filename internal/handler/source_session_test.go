@@ -239,21 +239,38 @@ func TestRevalidateSessionDoesNotRunWithoutAStoredSession(t *testing.T) {
 // --- sync ------------------------------------------------------------------
 
 // syncStubSource is a codeStubSource that also implements the optional
-// source.SyncProvider capability, recording refreshes so a test can prove the
-// status read never triggered one.
+// source.SyncProvider capability. Its counter covers every method a status read
+// could use to fetch — the library reads GetStats and ListChannels, and Refresh
+// — not just Refresh, so a status that fetched through a channel or stats read
+// would be caught too. LastSyncedAt is deliberately NOT counted: it is the
+// cache-only fact the status is allowed to read.
 type syncStubSource struct {
 	codeStubSource
 	mu         sync.Mutex
-	refreshes  int
+	reads      int
 	refreshErr error
 	syncedAt   time.Time
 }
 
-func (s *syncStubSource) Refresh(context.Context) error {
+func (s *syncStubSource) note() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.refreshes++
+	s.reads++
+	s.mu.Unlock()
+}
+
+func (s *syncStubSource) Refresh(context.Context) error {
+	s.note()
 	return s.refreshErr
+}
+
+func (s *syncStubSource) GetStats() (*source.Stats, error) {
+	s.note()
+	return &source.Stats{}, nil
+}
+
+func (s *syncStubSource) ListChannels(string, int, int) ([]source.Channel, int, error) {
+	s.note()
+	return nil, 0, nil
 }
 
 func (s *syncStubSource) LastSyncedAt() (time.Time, bool) {
@@ -265,16 +282,32 @@ func (s *syncStubSource) LastSyncedAt() (time.Time, bool) {
 	return s.syncedAt, true
 }
 
-func (s *syncStubSource) refreshCount() int {
+func (s *syncStubSource) readCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.refreshes
+	return s.reads
+}
+
+// ctxAwareStubSource is a codeStubSource whose validation read honours a
+// caller's context, mirroring the adapter's source.ContextChannelLister
+// capability. onList runs the canned behaviour; it lets a test prove that a
+// cancelled boot re-check aborts rather than running to completion.
+type ctxAwareStubSource struct {
+	codeStubSource
+	onList func(ctx context.Context) error
+}
+
+func (s *ctxAwareStubSource) ListChannelsContext(ctx context.Context, _ string, _ int, _ int) ([]source.Channel, int, error) {
+	if s.onList == nil {
+		return nil, 0, s.listErr
+	}
+	return nil, 0, s.onList(ctx)
 }
 
 // Status reports the last-sync time from the source's own cached fact and
-// performs no upstream read to do it. The refresh counter proves the absence of
-// a network read is real: a status that fetched to report the time would
-// increment it.
+// performs no upstream read to do it. The counter covers every source method a
+// status read could use to fetch — Refresh, GetStats and ListChannels — so the
+// absence is not merely "Refresh was not called".
 func TestSourceStatusReportsLastSyncedAtWithoutFetching(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, _, _ := newTestSourceHandler(t, source.Config{Name: adobotvhttp.Name}, "")
@@ -293,25 +326,20 @@ func TestSourceStatusReportsLastSyncedAtWithoutFetching(t *testing.T) {
 	if raw != at.Format(time.RFC3339) {
 		t.Errorf("last_synced_at = %q, want %q", raw, at.Format(time.RFC3339))
 	}
-	if n := stub.refreshCount(); n != 0 {
-		t.Errorf("the status read triggered %d upstream refreshes, want 0", n)
+	if n := stub.readCount(); n != 0 {
+		t.Errorf("the status read triggered %d source reads, want 0 (a last-sync time is a local fact)", n)
 	}
 }
 
-// A source that cannot sync reports neither sync field, and an import source
-// reports no revalidate time either. Paired with the case above so the absence
-// is measured against a source that does report them.
-func TestSourceStatusOmitsSyncFieldsWhenNotApplicable(t *testing.T) {
+// A source that cannot sync reports no last-synced time. Paired with the case
+// above, which proves the same field is present for a source that does.
+func TestSourceStatusOmitsLastSyncedAtForANonSyncSource(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	// An imported playlist: no SyncProvider, no code.
+	// An imported playlist: no SyncProvider.
 	h, _, _ := newTestSourceHandler(t, source.Config{Name: "file"}, "")
-	body := statusBody(t, h)
-	if _, present := body["last_synced_at"]; present {
-		t.Errorf("last_synced_at = %v, want it absent for a non-sync source", body["last_synced_at"])
-	}
-	if _, present := body["playlist_revalidate_at"]; present {
-		t.Errorf("playlist_revalidate_at = %v, want it absent without a stored code", body["playlist_revalidate_at"])
+	if v, present := statusBody(t, h)["last_synced_at"]; present {
+		t.Errorf("last_synced_at = %v, want it absent for a non-sync source", v)
 	}
 
 	// A code-taking source whose library has not been fetched yet: the provider
@@ -322,9 +350,8 @@ func TestSourceStatusOmitsSyncFieldsWhenNotApplicable(t *testing.T) {
 	if err := h2.codes.Save("STORED-CODE"); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	body2 := statusBody(t, h2)
-	if _, present := body2["last_synced_at"]; present {
-		t.Errorf("last_synced_at = %v, want it absent before any fetch", body2["last_synced_at"])
+	if v, present := statusBody(t, h2)["last_synced_at"]; present {
+		t.Errorf("last_synced_at = %v, want it absent before any fetch", v)
 	}
 }
 
@@ -359,6 +386,69 @@ func TestSourceStatusReportsRevalidateAtOnlyWithStoredCode(t *testing.T) {
 	}
 }
 
+// playlist_revalidate_at is reported only for a code-taking source. This test
+// uses a real window and a stored code, so the guards reached are the
+// source-type one — not the earlier "window disabled" or "no stored code"
+// guards. The same stored code DOES report the field while a code-taking source
+// is active, and swapping to an import source is what makes it disappear, so
+// the absence is not vacuous.
+func TestSourceStatusOmitsRevalidateAtForANonCodeSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	base := time.Now().UTC()
+	h, _, store := newSessionHandler(t, base, DefaultSessionWindow)
+	ageStoredCode(t, store, "STORED-CODE", base.Add(-2*time.Hour))
+
+	if _, ok := statusBody(t, h)["playlist_revalidate_at"].(string); !ok {
+		t.Fatal("a code-taking source with a stored code must report playlist_revalidate_at")
+	}
+
+	h.player.SwapSource(&codeStubSource{name: "file"})
+	if v, present := statusBody(t, h)["playlist_revalidate_at"]; present {
+		t.Errorf("playlist_revalidate_at = %v, want it absent for an import source", v)
+	}
+}
+
+// A cancelled boot re-check aborts through the context threaded into the
+// validation read, and — crucially — leaves the credential exactly where it
+// was: a cancellation is a transport failure, which is inconclusive and must
+// never end a session.
+func TestRevalidateSessionCancellationLeavesTheCredential(t *testing.T) {
+	base := time.Now().UTC()
+	const code = "STORED-SESSION-CODE"
+	h, _, store := newSessionHandler(t, base, DefaultSessionWindow)
+	ageStoredCode(t, store, code, base.Add(-8*24*time.Hour))
+
+	entered := make(chan struct{})
+	stub := &ctxAwareStubSource{
+		codeStubSource: codeStubSource{name: adobotvhttp.Name},
+		onList: func(ctx context.Context) error {
+			close(entered)
+			<-ctx.Done()
+			return fmt.Errorf("%w: %v", adobotvhttp.ErrUpstream, ctx.Err())
+		},
+	}
+	h.open = func(source.Config) (source.Source, error) { return stub, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan SessionOutcome, 1)
+	go func() { out <- h.RevalidateSession(ctx) }()
+
+	<-entered
+	cancel()
+
+	select {
+	case got := <-out:
+		if got != SessionUnchanged {
+			t.Fatalf("outcome = %v, want unchanged for a cancelled re-check", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the cancelled re-check did not return: cancellation did not reach the read")
+	}
+	if _, ok, err := store.Load(); err != nil || !ok {
+		t.Fatalf("store after a cancelled re-check = (ok=%v, err=%v), want the credential intact", ok, err)
+	}
+}
+
 // syncRouter wires the endpoints a sync test needs.
 func syncRouter(h *SourceHandler) *gin.Engine {
 	r := gin.New()
@@ -383,8 +473,8 @@ func TestSyncSourceRefreshesAndReturnsStatus(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
-	if n := stub.refreshCount(); n != 1 {
-		t.Errorf("refresh count = %d, want 1", n)
+	if n := stub.readCount(); n != 1 {
+		t.Errorf("source reads = %d, want 1 (the Refresh)", n)
 	}
 	var body map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
@@ -440,7 +530,22 @@ func TestSyncSourceReportsRefreshFailure(t *testing.T) {
 	if body.Code != codePlaylistRejected {
 		t.Errorf("code = %q, want %q", body.Code, codePlaylistRejected)
 	}
-	if n := stub.refreshCount(); n != 1 {
-		t.Errorf("refresh count = %d, want 1", n)
+	if n := stub.readCount(); n != 1 {
+		t.Errorf("source reads = %d, want 1 (the failed Refresh)", n)
+	}
+}
+
+// CanSync is the capability gate the scheduler consults before asking: true
+// only when the active source has an upstream library to refresh.
+func TestCanSyncTracksTheActiveSource(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, _, _ := newTestSourceHandler(t, source.Config{Name: "file"}, "")
+	if h.CanSync() {
+		t.Error("CanSync with an imported playlist = true, want false")
+	}
+
+	h.player.SwapSource(&syncStubSource{codeStubSource: codeStubSource{name: adobotvhttp.Name}})
+	if !h.CanSync() {
+		t.Error("CanSync with a sync-capable source = false, want true")
 	}
 }
