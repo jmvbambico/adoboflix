@@ -405,6 +405,10 @@ Rules worth stating, because they are choices rather than accidents:
   between calls.
 - **`created_at` drives "newest first".** Entries with a timestamp come before
   those without (`NULLS LAST`), and ties break by name.
+- **Values are compared as trimmed text.** A category written `" Films "` is
+  exposed *and filtered* as `Films`, and genres, providers and channel
+  categories are listed once per case-insensitive value — so the list never
+  advertises something the filter would fail to match.
 
 ### How ids are derived
 
@@ -422,7 +426,19 @@ the item's identity fields, prefixed so the kinds stay apart:
 | Entry | `vod-` | name, category |
 | Stream | `str-` | channel_id, label, url |
 | VodStream | `str-` | vod_id, label, url |
-| Episode | `ep-` | vod_id, season_number, episode_number |
+| Episode | `ep-` | vod_id, season_number, episode_number, name, stream_url |
+
+The episode derivation includes the name and stream URL on purpose: a playlist
+may list episodes without season/episode numbers, and those unmarshal to `0`.
+Hashing only the numbers would give every such episode the same id and the
+loader would drop all but the first. Including enough identity keeps rows that
+genuinely differ apart.
+
+When two distinct rows still derive the same id — they are identical in every
+field the derivation reads — the adapter suffixes the second (`…-2`, `…-3`)
+rather than dropping it, following file order so the suffix is stable across
+reloads. Rows whose ids are *given* in the file and repeat are a malformed
+file, and the later one is still skipped as ambiguous.
 
 Derivation only helps **top-level** items, because a child references its
 parent by an id the file spells out. A derived parent id cannot be referenced,

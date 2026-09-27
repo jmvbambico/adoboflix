@@ -2,7 +2,6 @@ package file
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/jmvbambico/adoboflix/internal/source"
@@ -48,43 +47,27 @@ func (a *Adapter) Search(q, provider, genre, contentType string, page, limit int
 }
 
 // GetProviders returns the distinct provider (source_type) values in the
-// library, sorted. An empty library yields an empty slice, not nil.
+// library, sorted. An empty library yields an empty slice, not nil. Values are
+// deduplicated case-insensitively, so the list never advertises two providers
+// that filterEntries treats as one.
 func (a *Adapter) GetProviders() ([]string, error) {
-	distinct := map[string]struct{}{}
-	providers := []string{}
+	providers := make([]string, 0, len(a.lib.entries))
 	for _, e := range a.lib.entries {
-		p := strings.TrimSpace(e.SourceType)
-		if p == "" {
-			continue
-		}
-		if _, seen := distinct[p]; seen {
-			continue
-		}
-		distinct[p] = struct{}{}
-		providers = append(providers, p)
+		providers = append(providers, e.SourceType)
 	}
-	sort.Strings(providers)
-	return providers, nil
+	return distinctValues(providers), nil
 }
 
 // GetGenres returns the distinct non-empty categories in the library, sorted.
-// An empty library yields an empty slice, not nil.
+// An empty library yields an empty slice, not nil. Values are deduplicated
+// case-insensitively, so the list never advertises two genres that
+// filterEntries treats as one.
 func (a *Adapter) GetGenres() ([]string, error) {
-	distinct := map[string]struct{}{}
-	genres := []string{}
+	genres := make([]string, 0, len(a.lib.entries))
 	for _, e := range a.lib.entries {
-		g := strings.TrimSpace(derefOr(e.Category, ""))
-		if g == "" {
-			continue
-		}
-		if _, seen := distinct[g]; seen {
-			continue
-		}
-		distinct[g] = struct{}{}
-		genres = append(genres, g)
+		genres = append(genres, derefOr(e.Category, ""))
 	}
-	sort.Strings(genres)
-	return genres, nil
+	return distinctValues(genres), nil
 }
 
 // EpisodeCounts returns, for each requested VOD id, how many episodes it has.
@@ -156,23 +139,14 @@ func (a *Adapter) ListChannels(category string, limit, offset int) ([]source.Cha
 }
 
 // ListChannelCategories returns the distinct non-empty channel categories,
-// sorted.
+// sorted. Values are deduplicated case-insensitively, so the list never
+// advertises two categories that channelMatchesCategory treats as one.
 func (a *Adapter) ListChannelCategories() ([]string, error) {
-	distinct := map[string]struct{}{}
-	categories := []string{}
+	categories := make([]string, 0, len(a.lib.channels))
 	for _, ch := range a.lib.channels {
-		c := strings.TrimSpace(derefOr(ch.Category, ""))
-		if c == "" {
-			continue
-		}
-		if _, seen := distinct[c]; seen {
-			continue
-		}
-		distinct[c] = struct{}{}
-		categories = append(categories, c)
+		categories = append(categories, derefOr(ch.Category, ""))
 	}
-	sort.Strings(categories)
-	return categories, nil
+	return distinctValues(categories), nil
 }
 
 // GetChannel returns a single channel by its opaque id.

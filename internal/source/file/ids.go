@@ -48,9 +48,16 @@ func derivedVodStreamID(s source.VodStream) string {
 	return "str-" + hashParts("vod-stream", s.VodID, s.Label, s.URL)
 }
 
+// derivedEpisodeID includes the episode's name and stream URL, not just its
+// season and episode numbers. A playlist may list episodes with those numbers
+// omitted, in which case they both unmarshal to 0; hashing only the numbers
+// would give every such episode the same id and parseLibrary would then drop
+// all but the first as duplicates. Name and URL are what distinguish rows that
+// genuinely differ.
 func derivedEpisodeID(e source.Episode) string {
 	return "ep-" + hashParts("episode", e.VodID,
-		strconv.Itoa(e.SeasonNumber), strconv.Itoa(e.EpisodeNumber))
+		strconv.Itoa(e.SeasonNumber), strconv.Itoa(e.EpisodeNumber),
+		e.Name, derefOr(e.StreamURL, ""))
 }
 
 // hashParts joins parts with a separator that cannot occur in a name and
