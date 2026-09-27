@@ -22,6 +22,7 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/source"
 
 	// Adapters register themselves with internal/source from their init.
+	_ "github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
 
@@ -71,9 +72,6 @@ func main() {
 	}
 	log.Printf("[source] using %q", sourceName)
 
-	// Initialize EPG service (non-fatal if compiled_epg is empty)
-	epgService := epg.NewService(database)
-
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.Default()
@@ -82,7 +80,17 @@ func main() {
 	r.Use(middleware.CORS())
 
 	// Initialize handlers
-	playerHandler := handler.NewPlayerHandler(playerSource).WithEPG(epgService)
+	playerHandler := handler.NewPlayerHandler(playerSource)
+
+	// EPG is an OPTIONAL source capability. Only a source that can supply the
+	// compiled XMLTV blob gets an EPG service; for any other source h.epg stays
+	// nil and the EPG endpoint reports it as unavailable rather than panicking.
+	// Loading is non-fatal if compiled_epg is empty, so a fresh install boots.
+	if provider, ok := playerSource.(source.CompiledEPGProvider); ok {
+		playerHandler = playerHandler.WithEPG(epg.NewService(provider))
+	} else {
+		log.Printf("[EPG] source %q does not provide EPG data; the EPG endpoint will report it as unavailable", sourceName)
+	}
 
 	// API routes
 	api := r.Group("/api/v1")

@@ -37,7 +37,7 @@ func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
 func (h *PlayerHandler) GetStats(c *gin.Context) {
 	stats, err := h.src.GetStats()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 	c.JSON(http.StatusOK, stats)
@@ -52,7 +52,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 
 	entries, total, err := h.src.GetEntries(provider, genre, contentType, page, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 
@@ -103,7 +103,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 func (h *PlayerHandler) GetEntry(c *gin.Context) {
 	entry, err := h.src.GetEntry(c.Param("id"))
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found"})
+		writeSourceError(c, err, "Entry not found")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"entry": entry})
@@ -119,7 +119,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 
 	entries, total, err := h.src.Search(q, provider, genre, contentType, page, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -131,7 +131,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 func (h *PlayerHandler) GetProviders(c *gin.Context) {
 	providers, err := h.src.GetProviders()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"providers": providers})
@@ -140,7 +140,7 @@ func (h *PlayerHandler) GetProviders(c *gin.Context) {
 func (h *PlayerHandler) GetGenres(c *gin.Context) {
 	genres, err := h.src.GetGenres()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"genres": genres})
@@ -194,7 +194,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 
 	entry, err := h.src.GetEntry(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found or no stream URL"})
+		writeSourceError(c, err, "Entry not found or no stream URL")
 		return
 	}
 
@@ -282,7 +282,7 @@ func (h *PlayerHandler) GetEpisodes(c *gin.Context) {
 
 	episodes, err := h.src.GetEpisodes(vodID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No episodes found"})
+		writeSourceError(c, err, "No episodes found")
 		return
 	}
 
@@ -310,8 +310,12 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 	}
 
 	episode, err := h.src.GetEpisode(episodeID)
-	if err != nil || episode.StreamURL == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Episode not found or no stream URL"})
+	if err != nil {
+		writeSourceError(c, err, "Episode not found or no stream URL")
+		return
+	}
+	if episode.StreamURL == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Episode not found or no stream URL", "code": codeNotFound})
 		return
 	}
 
@@ -460,7 +464,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 
 	channels, total, err := h.src.ListChannels(category, limit, (page-1)*limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 
@@ -470,7 +474,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
 	cats, err := h.src.ListChannelCategories()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeSourceError(c, err, "")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"categories": cats})
@@ -480,7 +484,7 @@ func (h *PlayerHandler) GetChannel(c *gin.Context) {
 	id := c.Param("id")
 	channel, streams, err := h.src.GetChannelWithStreams(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		writeSourceError(c, err, "Channel not found")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"channel": channel, "streams": streams})
@@ -489,8 +493,12 @@ func (h *PlayerHandler) GetChannel(c *gin.Context) {
 func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 	id := c.Param("id")
 	stream, err := h.src.ResolveChannelStream(id)
-	if err != nil || stream == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Stream not found"})
+	if err != nil {
+		writeSourceError(c, err, "Stream not found")
+		return
+	}
+	if stream == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Stream not found", "code": codeNotFound})
 		return
 	}
 
@@ -524,10 +532,18 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
+	// EPG is an optional source capability. A source that cannot supply a
+	// compiled XMLTV blob leaves h.epg unset; report that plainly, naming the
+	// active source, instead of dereferencing a nil service.
+	if h.epg == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": source.UnsupportedEPGError(h.src.Name()).Error()})
+		return
+	}
+
 	id := c.Param("id")
 	channel, err := h.src.GetChannel(id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		writeSourceError(c, err, "Channel not found")
 		return
 	}
 

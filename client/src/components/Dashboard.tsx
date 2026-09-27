@@ -23,6 +23,7 @@ import Header from "./Header";
 import MediaCard from "./MediaCard";
 import CustomPlayer from "./CustomPlayer";
 import GlowBackground from "./GlowBackground";
+import SourceStatusPanel from "./SourceStatusPanel";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
   ChevronDown, ChevronRight, CircleCheck, Film, ListFilter, Users, BookOpen,
@@ -83,6 +84,10 @@ export default function Dashboard() {
   // Selected Movie for active cinematic playback details
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
 
+  // A failed playable call (resolve/stream). Kept so the gate it carries can be
+  // shown instead of an empty player; retry re-runs the action that failed.
+  const [playbackError, setPlaybackError] = useState<{ error: unknown; retry: () => void } | null>(null);
+
   // Series episode state
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [currentEpisode, setCurrentEpisode] = useState<Episode | null>(null);
@@ -102,11 +107,20 @@ export default function Dashboard() {
   // Core Queries using TanStack Query
 
   // 1. Fetching catalogue from AdoboTV PostgreSQL backend
-  const { data: videos = [], isLoading } = useQuery<Video[]>({
+  const {
+    data: videos = [],
+    isLoading,
+    isError: isVideosError,
+    error: videosError,
+    refetch: refetchVideos,
+  } = useQuery<Video[]>({
     queryKey: ["videos", searchQuery, selectedCategory],
     queryFn: () => fetchVideos({ search: searchQuery, category: selectedCategory }),
     staleTime: 5 * 60 * 1000,
   });
+
+  // The library failed and there is no cached data to fall back on.
+  const libraryUnavailable = isVideosError && videos.length === 0;
 
   // 1b. Fetch genre categories from backend
   const { data: categories = FALLBACK_CATEGORIES } = useQuery<string[]>({
@@ -223,6 +237,7 @@ export default function Dashboard() {
   const triggerPlayVideo = async (video: Video) => {
     setSelectedChannel(null);
     setCurrentEpisode(null);
+    setPlaybackError(null);
     try {
       const resolved = await resolveStream(video.id);
       setSelectedVideo({ ...video, videoUrl: resolved.url, drmType: resolved.drm_type, drmK: resolved.drm_k, licenseUrl: resolved.license_url, provider: resolved.provider, userAgent: resolved.user_agent, referer: resolved.referer });
@@ -245,14 +260,16 @@ export default function Dashboard() {
       } else {
         setEpisodes([]);
       }
-    } catch {
+    } catch (e) {
       setSelectedVideo(video);
+      setPlaybackError({ error: e, retry: () => { void triggerPlayVideo(video); } });
     }
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   // Play a specific episode
   const playEpisode = async (episode: Episode) => {
+    setPlaybackError(null);
     try {
       const resolved = await resolveEpisode(episode.id);
       setCurrentEpisode(episode);
@@ -269,6 +286,7 @@ export default function Dashboard() {
       } : null);
     } catch (e) {
       console.error("Failed to resolve episode:", e);
+      setPlaybackError({ error: e, retry: () => { void playEpisode(episode); } });
     }
   };
 
@@ -349,6 +367,7 @@ export default function Dashboard() {
     setSelectedVideo(null);
     setChannelStream(null);
     setSelectedChannel(channel);
+    setPlaybackError(null);
     // Auto-expand this channel's category in the sidebar accordion
     if (channel.category) {
       setChannelAccordion(prev => ({ ...prev, [channel.category!]: true }));
@@ -359,6 +378,7 @@ export default function Dashboard() {
       setChannelStream(resolved);
     } catch (e) {
       console.error("Failed to resolve channel stream:", e);
+      setPlaybackError({ error: e, retry: () => { void triggerPlayChannel(channel); } });
     }
   };
 
@@ -424,19 +444,23 @@ export default function Dashboard() {
                     </div>
                   </div>
 
-                  <CustomPlayer
-                    id={selectedChannel.id}
-                    videoUrl={channelStream?.url || ""}
-                    title={selectedChannel.name}
-                    thumbnailUrl={selectedChannel?.logo || ""}
-                    drmType={channelStream?.drm_type || ""}
-                    drmK={channelStream?.drm_k || ""}
-                    licenseUrl={channelStream?.license_url || ""}
-                    userAgent={channelStream?.user_agent}
-                    referer={channelStream?.referer}
-                    durationSeconds={0}
-                    isLive={true}
-                  />
+                  {playbackError ? (
+                    <SourceStatusPanel error={playbackError.error} onRetry={playbackError.retry} />
+                  ) : (
+                    <CustomPlayer
+                      id={selectedChannel.id}
+                      videoUrl={channelStream?.url || ""}
+                      title={selectedChannel.name}
+                      thumbnailUrl={selectedChannel?.logo || ""}
+                      drmType={channelStream?.drm_type || ""}
+                      drmK={channelStream?.drm_k || ""}
+                      licenseUrl={channelStream?.license_url || ""}
+                      userAgent={channelStream?.user_agent}
+                      referer={channelStream?.referer}
+                      durationSeconds={0}
+                      isLive={true}
+                    />
+                  )}
 
                   {/* Channel Info + Stream Details — merged panel */}
                   <div className="mt-4 glass-panel p-5 rounded-2xl border border-white/5 flex flex-col gap-4">
@@ -707,40 +731,44 @@ export default function Dashboard() {
                     <span className="text-xs font-mono text-orange-450">STATUS: INTERACTIVE TRANSMISSION READY</span>
                   </div>
 
-                  <CustomPlayer
-                    id={selectedVideo.id}
-                    videoUrl={selectedVideo.videoUrl}
-                    title={selectedVideo.title}
-                    thumbnailUrl={selectedVideo?.thumbnailUrl}
-                    durationSeconds={selectedVideo.durationSeconds}
-                    onProgress={(progress, currentTime) => {
-                      updateHistoryMutation.mutate({ videoId: selectedVideo.id, currentTime });
-                    }}
-                    onEnded={() => {
-                      if (selectedVideo.type === "Series" && episodes.length > 0) {
-                        playNextEpisode();
-                      }
-                    }}
-                    savedTime={getResumeTime(selectedVideo.id)}
-                    type={selectedVideo.type}
-                    year={selectedVideo.year}
-                    tags={selectedVideo.tags}
-                    description={selectedVideo.description}
-                    drmType={selectedVideo.drmType}
-                    drmK={selectedVideo.drmK}
-                    licenseUrl={selectedVideo.licenseUrl}
-                    userAgent={selectedVideo.userAgent}
-                    referer={selectedVideo.referer}
-                    hasPrevEpisode={selectedVideo.type === "Series" && currentEpisode !== null ? getEpisodeNavState().hasPrev : false}
-                    hasNextEpisode={selectedVideo.type === "Series" && currentEpisode !== null ? getEpisodeNavState().hasNext : false}
-                    onPrevEpisode={playPrevEpisode}
-                    onNextEpisode={playNextEpisode}
-                    episodes={selectedVideo.type === "Series" ? episodes : undefined}
-                    currentEpisode={currentEpisode}
-                    selectedSeason={selectedSeason}
-                    onSelectSeason={(s) => setSelectedSeason(s)}
-                    onPlayEpisode={(ep) => playEpisode(ep)}
-                  />
+                  {playbackError ? (
+                    <SourceStatusPanel error={playbackError.error} onRetry={playbackError.retry} />
+                  ) : (
+                    <CustomPlayer
+                      id={selectedVideo.id}
+                      videoUrl={selectedVideo.videoUrl}
+                      title={selectedVideo.title}
+                      thumbnailUrl={selectedVideo?.thumbnailUrl}
+                      durationSeconds={selectedVideo.durationSeconds}
+                      onProgress={(progress, currentTime) => {
+                        updateHistoryMutation.mutate({ videoId: selectedVideo.id, currentTime });
+                      }}
+                      onEnded={() => {
+                        if (selectedVideo.type === "Series" && episodes.length > 0) {
+                          playNextEpisode();
+                        }
+                      }}
+                      savedTime={getResumeTime(selectedVideo.id)}
+                      type={selectedVideo.type}
+                      year={selectedVideo.year}
+                      tags={selectedVideo.tags}
+                      description={selectedVideo.description}
+                      drmType={selectedVideo.drmType}
+                      drmK={selectedVideo.drmK}
+                      licenseUrl={selectedVideo.licenseUrl}
+                      userAgent={selectedVideo.userAgent}
+                      referer={selectedVideo.referer}
+                      hasPrevEpisode={selectedVideo.type === "Series" && currentEpisode !== null ? getEpisodeNavState().hasPrev : false}
+                      hasNextEpisode={selectedVideo.type === "Series" && currentEpisode !== null ? getEpisodeNavState().hasNext : false}
+                      onPrevEpisode={playPrevEpisode}
+                      onNextEpisode={playNextEpisode}
+                      episodes={selectedVideo.type === "Series" ? episodes : undefined}
+                      currentEpisode={currentEpisode}
+                      selectedSeason={selectedSeason}
+                      onSelectSeason={(s) => setSelectedSeason(s)}
+                      onPlayEpisode={(ep) => playEpisode(ep)}
+                    />
+                  )}
 
                   {/* Movie Info + Stream Details — merged panel */}
                   <div className="mt-6 glass-panel p-5 rounded-2xl border border-white/5 flex flex-col gap-4">
@@ -1081,7 +1109,7 @@ export default function Dashboard() {
                 </div>
               )}
             </motion.div>
-          ) : (
+          ) : libraryUnavailable ? null : (
             /* DYNAMIC PREMIUM FEATURED BANNER HERO (if player is empty) */
             <motion.div
               initial={{ opacity: 0 }}
@@ -1368,6 +1396,8 @@ export default function Dashboard() {
                 <SpinnerOverlay />
                 <span className="text-xs font-mono text-violet-400 animate-pulse uppercase tracking-widest">Constructing glass lattice pipelines...</span>
               </div>
+            ) : libraryUnavailable ? (
+              <SourceStatusPanel error={videosError} onRetry={() => { void refetchVideos(); }} />
             ) : (
               <AnimatePresence mode="popLayout">
                 {activeTab === "browse" && (

@@ -28,10 +28,12 @@ import (
 const Name = "postgres-direct"
 
 // The adapter must satisfy the read-only boundary, and it can enumerate the
-// whole library, so it also offers the optional probe-listing capability.
+// whole library and read the compiled XMLTV blob, so it also offers the
+// optional probe-listing and EPG capabilities.
 var (
-	_ source.Source            = (*Adapter)(nil)
-	_ source.StreamProbeLister = (*Adapter)(nil)
+	_ source.Source              = (*Adapter)(nil)
+	_ source.StreamProbeLister   = (*Adapter)(nil)
+	_ source.CompiledEPGProvider = (*Adapter)(nil)
 )
 
 func init() {
@@ -358,4 +360,24 @@ func (a *Adapter) ListStreamsForProbe() ([]source.ProbeTarget, error) {
 		return nil, fmt.Errorf("list streams for probe: %w", err)
 	}
 	return targets, nil
+}
+
+// CompiledEPG returns the newest compiled XMLTV blob, still gzipped, with the
+// hash the compiler recorded for it. It implements the optional
+// CompiledEPGProvider capability: an HTTP adapter fetches the same gzipped
+// bytes from the playlist envelope's pre-tokenized EPG URL, and internal/epg
+// owns decompressing and parsing them for both.
+//
+// Read-only: a single SELECT of the two columns the EPG service needs, newest
+// row first. Columns are explicit — never "*".
+func (a *Adapter) CompiledEPG() ([]byte, string, error) {
+	type compiledRow struct {
+		Data []byte `db:"data"`
+		Hash string `db:"hash"`
+	}
+	var row compiledRow
+	if err := a.db.Get(&row, "SELECT data, hash FROM compiled_epg ORDER BY updated_at DESC LIMIT 1"); err != nil {
+		return nil, "", fmt.Errorf("read compiled_epg: %w", err)
+	}
+	return row.Data, row.Hash, nil
 }
