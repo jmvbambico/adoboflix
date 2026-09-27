@@ -18,6 +18,27 @@ export interface SourceStatusCopy {
 // happened and who can fix it, so a first-time subscriber sees the real reason
 // instead of an empty library.
 const COPY: Record<string, SourceStatusCopy> = {
+  // The entry state, not a failure: no code is configured yet, and the user
+  // clears it in this session by entering one. Kept actionable ("action") so
+  // the panel points at the fix rather than reading like a rejection.
+  playlist_code_required: {
+    severity: "action",
+    title: "This player needs a playlist code",
+    message:
+      "AdoboFlix has no AdoboTV playlist code yet, so AdoboTV serves no content. Enter your playlist code to load your library.",
+    hint: "You can do this right now — no restart or reinstall needed.",
+    retryLabel: "Enter playlist code",
+  },
+  // Not the user's to fix by typing: the running source takes no code at all,
+  // which is a choice made by whoever configured AdoboFlix.
+  playlist_code_not_supported: {
+    severity: "blocked",
+    title: "This source has no playlist code",
+    message:
+      "The active AdoboFlix source does not take a playlist code, so there is nothing to enter. AdoboFlix is configured to read a local file or the development database directly.",
+    hint: "Switch the AdoboFlix source to adobotv-http, then reload.",
+    retryLabel: "Reload",
+  },
   device_pending: {
     severity: "action",
     title: "This device is awaiting approval",
@@ -128,15 +149,25 @@ const UNREACHABLE: SourceStatusCopy = {
   retryLabel: "Reload",
 };
 
+// sourceStatusCopy returns the mapped copy for a known code, falling back to
+// the generic copy (keeping the code) for anything unrecognised. It lets a
+// caller that already holds a stable code — the entry form showing the
+// playlist_code_required state — render the same copy without fabricating an
+// error object to satisfy describeSourceError.
+export function sourceStatusCopy(code: string): SourceStatusCopy {
+  if (code !== "internal_error") {
+    const known = COPY[code];
+    if (known) return { ...known, code };
+  }
+  return { ...GENERIC, code };
+}
+
 // describeSourceError turns any thrown value into UI copy. Only the mapped
 // copy is ever rendered — the raw error message and the response body never
 // reach the screen.
 export function describeSourceError(error: unknown): SourceStatusCopy {
   if (!isApiError(error)) return UNREACHABLE;
   const { code } = error;
-  if (code && code !== "internal_error") {
-    const known = COPY[code];
-    if (known) return { ...known, code };
-  }
+  if (code) return sourceStatusCopy(code);
   return { ...GENERIC, code };
 }

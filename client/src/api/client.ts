@@ -172,6 +172,23 @@ async function getJSON<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Send a JSON body and decode a JSON reply, mapping a non-OK envelope through
+// the same ApiError path as every other call. The body stays in the request
+// body — never a query string — so a credential submitted here cannot leak into
+// a URL, history, or a referer.
+async function sendJSON<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw apiErrorFromResponse(res.status, url, text);
+  }
+  return res.json() as Promise<T>;
+}
+
 export async function fetchVideos(params: {
   search?: string;
   category?: string;
@@ -226,6 +243,34 @@ export async function fetchEpisodes(vodId: string): Promise<Episode[]> {
 // Resolve a specific episode's stream.
 export async function resolveEpisode(episodeId: string): Promise<ResolvedStream> {
   return getJSON<ResolvedStream>(`${API_BASE}/resolve/episode/${encodeURIComponent(episodeId)}`);
+}
+
+// ── Source / playlist code API ─────────────────────────────────────
+
+// What the active source is and whether it can serve content yet. The server
+// never returns the code itself; status exposes only these booleans.
+export interface SourceStatus {
+  source: string;
+  needs_playlist_code: boolean;
+  playlist_code_configured: boolean;
+}
+
+export function fetchSourceStatus(): Promise<SourceStatus> {
+  return getJSON<SourceStatus>(`${API_BASE}/source/status`);
+}
+
+// Submit a playlist code. The server validates it against the real upstream
+// before persisting: a gate that proves the code valid (device pending, an
+// inactive subscription) persists it, anything else persists nothing. The code
+// rides in the request body only and is never echoed back.
+export function setPlaylistCode(code: string): Promise<SourceStatus> {
+  return sendJSON<SourceStatus>("POST", `${API_BASE}/source/playlist-code`, { code });
+}
+
+// Clear a stored code and reopen the source from whatever configuration
+// remains (an environment fallback, or the unconfigured state).
+export function clearPlaylistCode(): Promise<SourceStatus> {
+  return sendJSON<SourceStatus>("DELETE", `${API_BASE}/source/playlist-code`);
 }
 
 // ── IPTV Channel API ───────────────────────────────────────────────

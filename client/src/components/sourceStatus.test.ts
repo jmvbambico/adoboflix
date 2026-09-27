@@ -9,6 +9,8 @@ import {
 // means a code that loses its mapping (or gains a wrong severity) fails a
 // test rather than silently falling through to the generic copy.
 const MAPPED: Array<{ code: string; severity: SourceStatusSeverity; title: string }> = [
+  { code: "playlist_code_required", severity: "action", title: "This player needs a playlist code" },
+  { code: "playlist_code_not_supported", severity: "blocked", title: "This source has no playlist code" },
   { code: "device_pending", severity: "action", title: "This device is awaiting approval" },
   { code: "subscription_inactive", severity: "action", title: "Subscription is not active" },
   { code: "playlist_rejected", severity: "blocked", title: "Playlist code was rejected" },

@@ -24,6 +24,7 @@ import MediaCard from "./MediaCard";
 import CustomPlayer from "./CustomPlayer";
 import GlowBackground from "./GlowBackground";
 import SourceStatusPanel from "./SourceStatusPanel";
+import PlaylistCodeGate from "./PlaylistCodeGate";
 import { describeChannelStatus } from "./channelStatus";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
@@ -138,14 +139,14 @@ export default function Dashboard() {
   });
 
   // 1d. Fetch IPTV channels from backend
-  const { data: iptvChannels = [], isLoading: iptvLoading } = useQuery<BackendChannel[]>({
+  const { data: iptvChannels = [], isLoading: iptvLoading, error: iptvError } = useQuery<BackendChannel[]>({
     queryKey: ["channels", selectedIptvCategory],
     queryFn: () => fetchChannelsAPI({ category: selectedIptvCategory, limit: 500 }),
     staleTime: 60 * 1000,
   });
 
   // 1e. Fetch EPG for currently selected channel
-  const { data: channelEPG } = useQuery<ChannelEPG | null>({
+  const { data: channelEPG, error: channelEPGError } = useQuery<ChannelEPG | null>({
     queryKey: ["channel-epg", selectedChannel?.id],
     queryFn: () => selectedChannel ? fetchChannelEPG(selectedChannel.id) : Promise.resolve(null),
     enabled: !!selectedChannel,
@@ -411,6 +412,11 @@ export default function Dashboard() {
       />
 
       <main className="w-full px-4 md:px-8 py-6 flex-grow flex flex-col gap-8">
+        
+        {/* Source connectivity gate: the entry form when AdoboTV needs a code,
+            a saved-code notice after a gated connect, or a compact clear
+            control when a code is already configured. */}
+        <PlaylistCodeGate errors={[videosError, iptvError, channelEPGError, playbackError?.error]} />
         
         {/* TAB 1 & ACTIVE DETAIL : IMMERSIVE CUSTOM CORE PLAYER STAGE */}
         <AnimatePresence mode="wait">
