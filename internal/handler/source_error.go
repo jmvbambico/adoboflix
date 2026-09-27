@@ -28,6 +28,16 @@ const (
 	codeMalformedVODLibrary  = "malformed_vod_library"
 	codeUpstreamError        = "upstream_error"
 	codeInternalError        = "internal_error"
+
+	// codePlaylistCodeRequired is the source asking for a playlist code that
+	// is not configured yet. It is its own code because it is its own state —
+	// the client shows the code-entry form rather than a rejection — and it is
+	// distinct from playlist_rejected, which means a code was supplied and
+	// refused.
+	codePlaylistCodeRequired = "playlist_code_required"
+	// codePlaylistCodeNotSupported is returned by the playlist-code endpoint
+	// when the active source takes no playlist code at all.
+	codePlaylistCodeNotSupported = "playlist_code_not_supported"
 )
 
 // sourceErrorStatus maps an error returned by the active source to the HTTP
@@ -71,6 +81,11 @@ func sourceErrorStatus(err error) (int, string) {
 		return http.StatusForbidden, codeSubscriptionInactive
 	case errors.Is(err, adobotvhttp.ErrPlaylistRejected):
 		return http.StatusForbidden, codePlaylistRejected
+	case errors.Is(err, adobotvhttp.ErrNoPlaylistCode):
+		// No code has been entered yet. 403 with its own code, not 500: the
+		// request was understood and a human must supply a credential before it
+		// can succeed.
+		return http.StatusForbidden, codePlaylistCodeRequired
 	case errors.Is(err, adobotvhttp.ErrUserAgentRejected):
 		return http.StatusForbidden, codeUserAgentRejected
 	case errors.Is(err, adobotvhttp.ErrPlaylistFormatM3U):

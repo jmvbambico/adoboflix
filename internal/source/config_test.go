@@ -148,3 +148,55 @@ func TestNeedsDatabaseUnknownName(t *testing.T) {
 		t.Error("NeedsDatabase(unknown) = true, want false")
 	}
 }
+
+// An adapter declares its playlist-code need at registration, the same way it
+// declares a database need, so the server can offer the code-entry endpoints
+// without hardcoding an adapter name.
+func TestNeedsPlaylistCodeFollowsRegistration(t *testing.T) {
+	const needs = "test-code-adapter"
+	const needsNot = "test-no-code-adapter"
+	Register(needs, Requirement{PlaylistCode: true}, func(Config) (Source, error) { return &fakeSource{}, nil })
+	Register(needsNot, Requirement{}, func(Config) (Source, error) { return &fakeSource{}, nil })
+
+	if !NeedsPlaylistCode(needs) {
+		t.Errorf("NeedsPlaylistCode(%q) = false, want true", needs)
+	}
+	if NeedsPlaylistCode(needsNot) {
+		t.Errorf("NeedsPlaylistCode(%q) = true, want false", needsNot)
+	}
+	if NeedsPlaylistCode("no-such-adapter") {
+		t.Error("NeedsPlaylistCode(unknown) = true, want false")
+	}
+}
+
+// An explicit playlist code is handed to a factory that asks for one, and the
+// field is ignored (passed through unchanged) for an adapter that does not.
+func TestOpenPassesPlaylistCodeToAdapter(t *testing.T) {
+	const name = "test-code-passthrough-adapter"
+	var got string
+	Register(name, Requirement{PlaylistCode: true}, func(cfg Config) (Source, error) {
+		got = cfg.PlaylistCode
+		return &fakeSource{}, nil
+	})
+
+	if _, err := Open(Config{Name: name, PlaylistCode: "  SECRET  "}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Open does not interpret the value; the adapter trims and validates it.
+	if got != "  SECRET  " {
+		t.Errorf("factory received %q, want the code passed through unchanged", got)
+	}
+
+	const plain = "test-no-code-passthrough-adapter"
+	var plainGot string
+	Register(plain, Requirement{}, func(cfg Config) (Source, error) {
+		plainGot = cfg.PlaylistCode
+		return &fakeSource{}, nil
+	})
+	if _, err := Open(Config{Name: plain, PlaylistCode: "ignored"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if plainGot != "ignored" {
+		t.Errorf("factory received %q; Config is passed through verbatim", plainGot)
+	}
+}

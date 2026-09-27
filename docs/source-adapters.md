@@ -261,6 +261,127 @@ the check entirely.
 
 ---
 
+## Entering the playlist code at runtime
+
+`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply the credential.
+The subscriber can enter it through the API while the server runs, and it is
+stored in a **local file the server owns** — never in the browser, and never
+upstream.
+
+### Precedence — the file wins
+
+| Source | Used when |
+|---|---|
+| `ADOBOFLIX_PLAYLIST_CODE_FILE` (default `.adoboflix/playlist-code`, mode `0600`) | it holds a code |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | no code has been stored |
+
+A code entered in the UI is the user's most recent explicit instruction, so a
+stale `.env` value must not override it; silently doing so would make the UI
+look broken. With **neither** present the source is *unconfigured*: the server
+boots (deliberately, so a new subscriber can supply the code),
+`/api/v1/source/status` reports `playlist_code_configured: false`, and every
+content route answers `403` with code `playlist_code_required` until a code is
+entered. Clearing the stored code falls back to the environment variable again.
+
+### The endpoints
+
+```
+GET    /api/v1/source/status
+  -> { "source": "...", "needs_playlist_code": bool,
+       "playlist_code_configured": bool }      # never the code
+
+POST   /api/v1/source/playlist-code    {"code": "..."}
+DELETE /api/v1/source/playlist-code
+```
+
+`POST` **validates before persisting**: it opens a candidate adapter and makes
+one cheap real call — the playlist envelope — so a wrong code fails here rather
+than on the user's first playback attempt. Whether the code is *kept* is then
+decided by whether AdoboTV recognised it, not by whether the call merely
+succeeded: a gate that runs after the code is resolved keeps the code, and a
+rejection or an inconclusive failure writes nothing. See "Which failures keep
+the code" below. Either way the code itself is never echoed, and the same gate
+code the rest of the API returns is returned — `playlist_rejected`,
+`device_pending`, `subscription_inactive`, `user_agent_rejected` and friends.
+The client already branches on those; no parallel vocabulary is introduced.
+
+`DELETE` clears the stored code and reopens the adapter from what remains (the
+environment fallback, or the unconfigured state). Clearing nothing is not an
+error.
+
+### Which failures keep the code
+
+`POST` keeps the code when it has **proved itself valid** — when AdoboTV
+recognised it and gated access for some other reason — and drops it otherwise.
+That split exists so a first-time subscriber whose device is awaiting approval
+does not have to retype a correct code after the operator approves it. The
+question is not "did the call succeed" but "did the code identify the
+subscriber". When the code is kept the gate is still returned, so the client
+shows the right screen; reads fail with that gate until it clears, then start
+working with no further user action.
+
+| Validation failure | Code kept? | Why |
+|---|---|---|
+| (success) | yes | — |
+| `device_pending` | **yes** | the device gate runs *after* the code is resolved, so the code was accepted; it clears on operator approval with no re-entry. |
+| `subscription_inactive` | **yes** | the playlist endpoint admits inactive/expired accounts, so the refusal is the account state, not the code. |
+| `playlist_format_m3u` | **yes** | the endpoint answered with this account's own playlist, so the code was accepted; the m3u format is an upstream account setting. |
+| `content_token_rejected` | **yes** | the playlist was served (the code was accepted) and only a minted token lapsed. |
+| `content_not_found` | **yes** | the playlist was served; only a specific item was missing. |
+| `playlist_rejected` | no | the code itself was refused. |
+| `user_agent_rejected` | no (ambiguous) | it is unclear whether the allowlist is checked before or after the code lookup, so it does not reliably prove the code valid; its remedy is a UA change, not re-entry. |
+| `malformed_playlist`, `malformed_drm`, `malformed_vod_library` | no | an unparseable 2xx body proves nothing about the code. |
+| `upstream_error` | no | an unreachable or failing upstream has said nothing about the code. |
+| `playlist_code_required`, anything unknown | no | default: when in doubt, do not persist. A code the user must re-enter is a smaller harm than a bad code sticking and failing every later request. |
+
+Only success and the `device_pending`, `subscription_inactive`,
+`playlist_rejected`, `user_agent_rejected`, `playlist_format_m3u`,
+`malformed_playlist` and `upstream_error` failures are reachable through the
+current validation call (a single playlist-envelope fetch). The rest are
+classified anyway so the rule is complete and survives a change to what
+validation exercises.
+
+### Known limits
+
+- **A swap does not refresh the health-scan manager.** `scanManager` builds its
+  `scanner.Manager` once under a `sync.Once`, from the source that was active at
+  the first scan, so a later playlist-code swap leaves it pointing at the
+  previous adapter. That is currently harmless: `adobotv-http` is not a
+  `StreamProbeLister`, so a scan against it is unsupported either way and no
+  manager is ever built for it, while the sources that *are* probe-listable
+  (`file`, `postgres-direct`) take no playlist code and never swap. Whoever makes
+  `adobotv-http` probe-listable must refresh the manager on swap first,
+  otherwise a scan would run against a stale credential.
+
+### The credential is write-only
+
+### How the swap is guarded
+
+The active source sits behind an atomic pointer. Reads are hot and swaps are
+rare, so the load path is a single atomic operation with no lock, and an
+in-flight request keeps whichever source it loaded — a swap can never race it.
+`PlayerHandler` reads the source only through one accessor, so a swap reaches
+every content route at once. Entering a code is the only thing that swaps; when
+the active source takes no playlist code (`file`, `postgres-direct`), `POST`
+answers `409 playlist_code_not_supported` and nothing is swapped.
+
+### The credential is write-only
+
+The code this API accepts is the same credential that must never reach the page
+(see "Stream URL exposure"). So it is never returned by any endpoint — not in a
+body, not masked; never logged (at most its length is); never included in an
+error message; written mode `0600`, atomically (temp file + rename); and stored
+in a local file rather than the browser. Keeping it in `localStorage` and
+sending it per request is explicitly rejected, because that puts the credential
+back in the page and undoes the work that took it off.
+
+Persisting it is a **local** write, not an upstream one. The First Law binds
+AdoboFlix against the AdoboTV database; a file the server owns, holding the
+user's own credential, is not a write to AdoboTV. No adapter gained a write
+method: the code is supplied to `source.Open` through an additive
+`source.Config.PlaylistCode` field and the adapter is reopened, exactly as it is
+at startup.
+
 ## Verifying the HTTP adapter locally
 
 AdoboTV can be run on this machine, so the adapter is verifiable end to end
@@ -731,6 +852,18 @@ AdoboTV's decoy defends against a *leaked playlist* reaching a third party —
 which does not transfer to a page only the subscriber loads. **Revisit it if
 AdoboFlix becomes multi-user or internet-exposed**, at which point the proxy
 needs authentication regardless.
+
+**What this change adds.** `/api/v1/source/playlist-code` is a new
+unauthenticated endpoint that **accepts a credential and writes it to disk**.
+That is consistent with the posture above — the server binds `127.0.0.1` by
+default and `/api/v1/proxy` is unauthenticated too — but it is a step up in
+consequence. The proxy leaks a CDN host to whoever can reach the port; this
+endpoint accepts and stores the subscriber's key. Anyone who can reach the port
+can replace the stored code (a denial of service against the subscriber) and,
+because a submitted code is validated against AdoboTV, can use the server as an
+oracle to test codes. If AdoboFlix ever becomes multi-user or
+internet-exposed, **these endpoints need authentication before anything else
+does** — before the proxy, before resolve.
 
 ---
 

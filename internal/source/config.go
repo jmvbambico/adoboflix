@@ -20,6 +20,14 @@ const EnvSource = "ADOBOFLIX_SOURCE"
 type Config struct {
 	Name string
 	DB   *sqlx.DB
+	// PlaylistCode is an explicit subscriber credential for an adapter that
+	// declared Requirement{PlaylistCode: true}. When empty such an adapter
+	// falls back to its own environment key; when a code is supplied here it
+	// wins. An adapter that takes no code ignores this field entirely.
+	//
+	// This is additive and read-only: it carries a credential in, never out,
+	// and grants no adapter a write method.
+	PlaylistCode string
 }
 
 // Factory opens an adapter from a Config.
@@ -32,6 +40,11 @@ type Factory func(Config) (Source, error)
 type Requirement struct {
 	// Database is true when the adapter reads a SQL handle.
 	Database bool
+	// PlaylistCode is true when the adapter authenticates with a subscriber
+	// playlist code the user can enter at runtime (adobotv-http). The server
+	// offers the code-entry endpoints only for a source that declares it, the
+	// same way it opens a database only for one that asks.
+	PlaylistCode bool
 }
 
 // registration is a factory plus what it declared it needs.
@@ -81,6 +94,14 @@ func Validate(name string) error {
 func NeedsDatabase(name string) bool {
 	reg, ok := factories[name]
 	return ok && reg.requirement.Database
+}
+
+// NeedsPlaylistCode reports whether the adapter registered under name
+// authenticates with a playlist code the user can enter at runtime. It is
+// meaningful for a name Validate accepts; an unknown name reports false.
+func NeedsPlaylistCode(name string) bool {
+	reg, ok := factories[name]
+	return ok && reg.requirement.PlaylistCode
 }
 
 // Open validates cfg and opens the selected adapter. An adapter that declared
