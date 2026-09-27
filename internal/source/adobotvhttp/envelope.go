@@ -46,8 +46,16 @@ type channelInfo struct {
 }
 
 // fetchEnvelope performs one GET of the playlist and maps every documented
-// rejection to its own error.
+// rejection to its own error. It is the single choke point every read passes
+// through, so it is also where a missing playlist code is reported: without a
+// code there is nothing to fetch, and every Source method that needs the
+// playlist fails here with ErrNoPlaylistCode rather than an upstream error.
 func (a *Adapter) fetchEnvelope(ctx context.Context) (*envelope, error) {
+	if strings.TrimSpace(a.playlistCode) == "" {
+		return nil, fmt.Errorf("%w: set %s or enter a code at POST /api/v1/source/playlist-code",
+			ErrNoPlaylistCode, EnvPlaylistCode)
+	}
+
 	endpoint := a.baseURL + "/v1/playlist/" + url.PathEscape(a.playlistCode)
 	body, status, err := a.get(ctx, endpoint)
 	if err != nil {

@@ -55,12 +55,29 @@ Configuration is via environment variables (`.env`, documented in
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
 | `ADOBOFLIX_SOURCE` | — | Source adapter: `adobotv-http`, `file`, or `postgres-direct` |
 | `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
-| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (required by `adobotv-http`) |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (optional; the UI can enter one instead) |
+| `ADOBOFLIX_PLAYLIST_CODE_FILE` | `.adoboflix/playlist-code` | Where a UI-entered playlist code is stored (0600) |
 | `ADOBOFLIX_FILE_PATH` | — | Playlist JSON path (required by `file`) |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
 | `SERVER_PORT` | `5656` | Port |
 
 The CLI flags `--host` and `--port` override `SERVER_HOST` / `SERVER_PORT`.
+
+### The playlist code
+
+For `adobotv-http`, the subscriber's playlist code can come from either place,
+and **the file wins**:
+
+- **Entered in the UI** — saved to `ADOBOFLIX_PLAYLIST_CODE_FILE` (mode `0600`).
+- **`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE`** — the fallback, used only when no code
+  has been stored.
+
+A UI-entered code is the user's most recent explicit instruction, so a stale
+`.env` value must not silently override it. The server boots with no code at
+all in this state, and the code-entry screen supplies one while it runs — no
+edit-and-restart. Clearing the stored code (DELETE `/api/v1/source/playlist-code`)
+falls back to the environment variable again. The code is never logged and
+never returned by any endpoint, not even masked.
 
 The bind address defaults to **loopback**. `/api/v1/proxy` is an
 unauthenticated fetcher and `/api/v1/resolve` returns the upstream CDN URL, so
@@ -114,6 +131,9 @@ All routes are served under `/api/v1` on the app's own origin.
 | GET | `/api/v1/channels/:id/resolve` | Resolve a channel's default stream |
 | GET | `/api/v1/channels/:id/epg` | EPG entries for a channel |
 | POST | `/api/v1/channels/scan` | **Not implemented** — currently returns `501 Not Implemented` |
+| GET | `/api/v1/source/status` | Active source name; whether it needs a playlist code and whether one is configured (never the code) |
+| POST | `/api/v1/source/playlist-code` | Validate a playlist code against the source, then persist and swap it in |
+| DELETE | `/api/v1/source/playlist-code` | Clear the stored playlist code |
 
 ### Query parameters
 

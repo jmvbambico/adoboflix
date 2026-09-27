@@ -261,6 +261,79 @@ the check entirely.
 
 ---
 
+## Entering the playlist code at runtime
+
+`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply the credential.
+The subscriber can enter it through the API while the server runs, and it is
+stored in a **local file the server owns** — never in the browser, and never
+upstream.
+
+### Precedence — the file wins
+
+| Source | Used when |
+|---|---|
+| `ADOBOFLIX_PLAYLIST_CODE_FILE` (default `.adoboflix/playlist-code`, mode `0600`) | it holds a code |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | no code has been stored |
+
+A code entered in the UI is the user's most recent explicit instruction, so a
+stale `.env` value must not override it; silently doing so would make the UI
+look broken. With **neither** present the source is *unconfigured*: the server
+boots (deliberately, so a new subscriber can supply the code),
+`/api/v1/source/status` reports `playlist_code_configured: false`, and every
+content route answers `403` with code `playlist_code_required` until a code is
+entered. Clearing the stored code falls back to the environment variable again.
+
+### The endpoints
+
+```
+GET    /api/v1/source/status
+  -> { "source": "...", "needs_playlist_code": bool,
+       "playlist_code_configured": bool }      # never the code
+
+POST   /api/v1/source/playlist-code    {"code": "..."}
+DELETE /api/v1/source/playlist-code
+```
+
+`POST` **validates before persisting**: it opens a candidate adapter and makes
+one cheap real call — the playlist envelope — so a wrong code fails here rather
+than on the user's first playback attempt. Only on success is the code written
+and the live adapter swapped; on any failure **nothing is written, nothing is
+swapped**, and the same gate code the rest of the API returns is returned:
+`playlist_rejected`, `device_pending`, `subscription_inactive`,
+`user_agent_rejected` and friends. The client already branches on those; no
+parallel vocabulary is introduced.
+
+`DELETE` clears the stored code and reopens the adapter from what remains (the
+environment fallback, or the unconfigured state). Clearing nothing is not an
+error.
+
+### How the swap is guarded
+
+The active source sits behind an atomic pointer. Reads are hot and swaps are
+rare, so the load path is a single atomic operation with no lock, and an
+in-flight request keeps whichever source it loaded — a swap can never race it.
+`PlayerHandler` reads the source only through one accessor, so a swap reaches
+every content route at once. Entering a code is the only thing that swaps; when
+the active source takes no playlist code (`file`, `postgres-direct`), `POST`
+answers `409 playlist_code_not_supported` and nothing is swapped.
+
+### The credential is write-only
+
+The code this API accepts is the same credential that must never reach the page
+(see "Stream URL exposure"). So it is never returned by any endpoint — not in a
+body, not masked; never logged (at most its length is); never included in an
+error message; written mode `0600`, atomically (temp file + rename); and stored
+in a local file rather than the browser. Keeping it in `localStorage` and
+sending it per request is explicitly rejected, because that puts the credential
+back in the page and undoes the work that took it off.
+
+Persisting it is a **local** write, not an upstream one. The First Law binds
+AdoboFlix against the AdoboTV database; a file the server owns, holding the
+user's own credential, is not a write to AdoboTV. No adapter gained a write
+method: the code is supplied to `source.Open` through an additive
+`source.Config.PlaylistCode` field and the adapter is reopened, exactly as it is
+at startup.
+
 ## Verifying the HTTP adapter locally
 
 AdoboTV can be run on this machine, so the adapter is verifiable end to end
@@ -731,6 +804,18 @@ AdoboTV's decoy defends against a *leaked playlist* reaching a third party —
 which does not transfer to a page only the subscriber loads. **Revisit it if
 AdoboFlix becomes multi-user or internet-exposed**, at which point the proxy
 needs authentication regardless.
+
+**What this change adds.** `/api/v1/source/playlist-code` is a new
+unauthenticated endpoint that **accepts a credential and writes it to disk**.
+That is consistent with the posture above — the server binds `127.0.0.1` by
+default and `/api/v1/proxy` is unauthenticated too — but it is a step up in
+consequence. The proxy leaks a CDN host to whoever can reach the port; this
+endpoint accepts and stores the subscriber's key. Anyone who can reach the port
+can replace the stored code (a denial of service against the subscriber) and,
+because a submitted code is validated against AdoboTV, can use the server as an
+oracle to test codes. If AdoboFlix ever becomes multi-user or
+internet-exposed, **these endpoints need authentication before anything else
+does** — before the proxy, before resolve.
 
 ---
 

@@ -16,6 +16,10 @@ go.work
 .env
 .env.local
 
+# Local playlist-code store (the credential a user enters in the UI). Default
+# location; ADOBOFLIX_PLAYLIST_CODE_FILE may point elsewhere.
+.adoboflix/
+
 # IDE
 .idea/
 .vscode/

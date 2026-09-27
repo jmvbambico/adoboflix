@@ -31,6 +31,13 @@ var (
 	// AdoboTV will not serve at all.
 	ErrPlaylistRejected = errors.New("adobotv-http: playlist code rejected")
 
+	// ErrNoPlaylistCode is returned when the adapter has no playlist code at
+	// all: ADOBOFLIX_ADOBOTV_PLAYLIST_CODE is unset and the user has not entered
+	// one through the API. The server boots in this state on purpose so a new
+	// subscriber can supply the code while it runs; every read that needs the
+	// playlist reports this rather than failing obscurely.
+	ErrNoPlaylistCode = errors.New("adobotv-http: no playlist code configured")
+
 	// ErrUserAgentRejected is returned when AdoboTV's User-Agent allowlist
 	// refuses the request. The configured UA must begin with one of the
 	// server's valid_user_agents prefixes.

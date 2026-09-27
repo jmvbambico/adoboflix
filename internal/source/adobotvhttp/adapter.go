@@ -62,9 +62,11 @@ var (
 
 func init() {
 	// The source.Config database handle is intentionally ignored: this adapter
-	// has no database access by construction.
-	source.Register(Name, source.Requirement{}, func(source.Config) (source.Source, error) {
-		return NewFromEnv()
+	// has no database access by construction. The playlist code is taken from
+	// Config when supplied (a code the user entered at runtime) and from the
+	// environment otherwise.
+	source.Register(Name, source.Requirement{PlaylistCode: true}, func(cfg source.Config) (source.Source, error) {
+		return newFromEnvWithCode(cfg.PlaylistCode)
 	})
 }
 

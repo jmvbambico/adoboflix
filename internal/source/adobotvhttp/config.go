@@ -43,7 +43,8 @@ const (
 )
 
 // Config is the adapter's constructor input. Tests build it directly; the
-// registry factory builds it from the environment.
+// registry factory builds it from the environment (plus an explicit playlist
+// code when source.Config carries one).
 type Config struct {
 	// BaseURL is AdoboTV's origin, without a trailing slash.
 	BaseURL string
@@ -61,14 +62,32 @@ type Config struct {
 	Clock func() time.Time
 }
 
-// configFromEnv reads and validates the adapter's configuration from os.Getenv.
+// configFromEnv reads and validates the adapter's configuration from os.Getenv,
+// requiring a playlist code.
 func configFromEnv() (Config, error) {
 	return configFrom(func(key string) string { return os.Getenv(key) })
 }
 
 // configFrom is configFromEnv with an injectable getter, so validation can be
-// tested without touching the process environment.
+// tested without touching the process environment. It requires a playlist
+// code; use configFromAllowEmptyCode for the runtime path, where the server may
+// start with no code and the user enters one while it runs.
 func configFrom(getenv func(string) string) (Config, error) {
+	cfg, err := configFromAllowEmptyCode(getenv)
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.PlaylistCode == "" {
+		return Config{}, fmt.Errorf("%s is not set: set it to your AdoboTV playlist code", EnvPlaylistCode)
+	}
+	return cfg, nil
+}
+
+// configFromAllowEmptyCode validates everything configFrom does except the
+// presence of a playlist code. An empty code yields a usable Config in an
+// unconfigured state; every read that needs the playlist then reports
+// ErrNoPlaylistCode rather than failing obscurely.
+func configFromAllowEmptyCode(getenv func(string) string) (Config, error) {
 	cfg := Config{
 		BaseURL:      strings.TrimSpace(getenv(EnvBaseURL)),
 		PlaylistCode: strings.TrimSpace(getenv(EnvPlaylistCode)),
@@ -88,10 +107,6 @@ func configFrom(getenv func(string) string) (Config, error) {
 	}
 	cfg.BaseURL = strings.TrimRight(cfg.BaseURL, "/")
 
-	if cfg.PlaylistCode == "" {
-		return Config{}, fmt.Errorf("%s is not set: set it to your AdoboTV playlist code", EnvPlaylistCode)
-	}
-
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = DefaultUserAgent
 	}
@@ -110,13 +125,31 @@ func configFrom(getenv func(string) string) (Config, error) {
 	return cfg, nil
 }
 
-// newWithConfig validates a Config and builds an Adapter.
+// newFromEnvWithCode builds the adapter from the process environment, using
+// code as the playlist code when it is non-empty and ADOBOFLIX_ADOBOTV_PLAYLIST_CODE
+// otherwise. Unlike NewFromEnv it accepts an empty code: the registry factory
+// uses it so the server can boot with no code configured and the user can enter
+// one through the API while it runs.
+func newFromEnvWithCode(code string) (*Adapter, error) {
+	code = strings.TrimSpace(code)
+	cfg, err := configFromAllowEmptyCode(func(key string) string {
+		if key == EnvPlaylistCode && code != "" {
+			return code
+		}
+		return os.Getenv(key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newWithConfig(cfg)
+}
+
+// newWithConfig validates a Config and builds an Adapter. An empty playlist
+// code is allowed: the adapter opens in an unconfigured state, and any read
+// that needs the playlist reports ErrNoPlaylistCode.
 func newWithConfig(cfg Config) (*Adapter, error) {
 	if strings.TrimSpace(cfg.BaseURL) == "" {
 		return nil, errors.New("adobotv-http: base URL is required")
-	}
-	if strings.TrimSpace(cfg.PlaylistCode) == "" {
-		return nil, errors.New("adobotv-http: playlist code is required")
 	}
 	if cfg.UserAgent == "" {
 		cfg.UserAgent = DefaultUserAgent

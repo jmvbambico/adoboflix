@@ -21,22 +21,64 @@ import (
 )
 
 type PlayerHandler struct {
-	src   source.Source
-	epg   *epg.Service
-	creds *credentialStore
+	source *swappableSource
+	epg    atomic.Pointer[epg.Service]
+	creds  *credentialStore
 }
 
+// swappableSource holds the active source behind an atomic pointer. Reads are
+// hot and a swap is rare, so the load path is a single atomic operation with no
+// lock; an in-flight read keeps whichever source it loaded, so a swap can never
+// race it. Entering a playlist code reopens the adapter and stores the new one
+// here.
+type swappableSource struct {
+	ptr atomic.Pointer[source.Source]
+}
+
+func newSwappableSource(src source.Source) *swappableSource {
+	s := &swappableSource{}
+	s.Store(src)
+	return s
+}
+
+func (s *swappableSource) Load() source.Source {
+	if p := s.ptr.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func (s *swappableSource) Store(src source.Source) { s.ptr.Store(&src) }
+
 func NewPlayerHandler(src source.Source) *PlayerHandler {
-	return &PlayerHandler{src: src, creds: newCredentialStore()}
+	return &PlayerHandler{source: newSwappableSource(src), creds: newCredentialStore()}
+}
+
+// src returns the active source. Every handler reads it through here rather
+// than caching it, because a playlist-code swap can replace it between
+// requests.
+func (h *PlayerHandler) src() source.Source { return h.source.Load() }
+
+// SwapSource replaces the active source and rebuilds the EPG service around
+// the new one, so the guide is fetched with the new credential rather than the
+// previous adapter's. A swap to a source without the EPG capability leaves EPG
+// reporting itself unavailable, exactly as a source that never had it.
+func (h *PlayerHandler) SwapSource(src source.Source) {
+	h.source.Store(src)
+	if provider, ok := src.(source.CompiledEPGProvider); ok {
+		h.epg.Store(epg.NewService(provider))
+		return
+	}
+	h.epg.Store(nil)
 }
 
 func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
-	h.epg = service
+	h.epg.Store(service)
 	return h
 }
 
 func (h *PlayerHandler) GetStats(c *gin.Context) {
-	stats, err := h.src.GetStats()
+	stats, err := h.src().GetStats()
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -51,7 +93,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
 
-	entries, total, err := h.src.GetEntries(provider, genre, contentType, page, limit)
+	entries, total, err := h.src().GetEntries(provider, genre, contentType, page, limit)
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -76,7 +118,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 	episodeCounts := map[string]int{}
 	countsAvailable := false
 	if len(seriesIDs) > 0 {
-		counts, err := h.src.EpisodeCounts(seriesIDs)
+		counts, err := h.src().EpisodeCounts(seriesIDs)
 		if err != nil {
 			// Do not report a misleading 0 for every Series: leave the field
 			// absent, exactly as when the count lookup was unavailable.
@@ -102,7 +144,7 @@ func (h *PlayerHandler) GetEntries(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetEntry(c *gin.Context) {
-	entry, err := h.src.GetEntry(c.Param("id"))
+	entry, err := h.src().GetEntry(c.Param("id"))
 	if err != nil {
 		writeSourceError(c, err, "Entry not found")
 		return
@@ -118,7 +160,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "200"))
 
-	entries, total, err := h.src.Search(q, provider, genre, contentType, page, limit)
+	entries, total, err := h.src().Search(q, provider, genre, contentType, page, limit)
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -130,7 +172,7 @@ func (h *PlayerHandler) Search(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetProviders(c *gin.Context) {
-	providers, err := h.src.GetProviders()
+	providers, err := h.src().GetProviders()
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -139,7 +181,7 @@ func (h *PlayerHandler) GetProviders(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetGenres(c *gin.Context) {
-	genres, err := h.src.GetGenres()
+	genres, err := h.src().GetGenres()
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -197,7 +239,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 		return
 	}
 
-	entry, err := h.src.GetEntry(id)
+	entry, err := h.src().GetEntry(id)
 	if err != nil {
 		writeSourceError(c, err, "Entry not found or no stream URL")
 		return
@@ -216,7 +258,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 	// error is a fault. Both still fall back so playback keeps working, but a
 	// fault must be visible in the logs rather than silently serving the
 	// stale stream_url cache.
-	vodStreams, streamErr := h.src.GetVodStreams(entry.ID)
+	vodStreams, streamErr := h.src().GetVodStreams(entry.ID)
 	if streamErr != nil {
 		log.Printf("resolve: GetVodStreams(%s) failed, falling back to cached stream_url: %v", entry.ID, streamErr)
 	}
@@ -285,7 +327,7 @@ func (h *PlayerHandler) GetEpisodes(c *gin.Context) {
 		return
 	}
 
-	episodes, err := h.src.GetEpisodes(vodID)
+	episodes, err := h.src().GetEpisodes(vodID)
 	if err != nil {
 		writeSourceError(c, err, "No episodes found")
 		return
@@ -314,7 +356,7 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 		return
 	}
 
-	episode, err := h.src.GetEpisode(episodeID)
+	episode, err := h.src().GetEpisode(episodeID)
 	if err != nil {
 		writeSourceError(c, err, "Episode not found or no stream URL")
 		return
@@ -483,7 +525,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 
-	channels, total, err := h.src.ListChannels(category, limit, (page-1)*limit)
+	channels, total, err := h.src().ListChannels(category, limit, (page-1)*limit)
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -493,7 +535,7 @@ func (h *PlayerHandler) ListChannels(c *gin.Context) {
 }
 
 func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
-	cats, err := h.src.ListChannelCategories()
+	cats, err := h.src().ListChannelCategories()
 	if err != nil {
 		writeSourceError(c, err, "")
 		return
@@ -503,7 +545,7 @@ func (h *PlayerHandler) GetChannelCategories(c *gin.Context) {
 
 func (h *PlayerHandler) GetChannel(c *gin.Context) {
 	id := c.Param("id")
-	channel, streams, err := h.src.GetChannelWithStreams(id)
+	channel, streams, err := h.src().GetChannelWithStreams(id)
 	if err != nil {
 		writeSourceError(c, err, "Channel not found")
 		return
@@ -513,7 +555,7 @@ func (h *PlayerHandler) GetChannel(c *gin.Context) {
 
 func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 	id := c.Param("id")
-	stream, err := h.src.ResolveChannelStream(id)
+	stream, err := h.src().ResolveChannelStream(id)
 	if err != nil {
 		writeSourceError(c, err, "Stream not found")
 		return
@@ -554,15 +596,18 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 
 func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 	// EPG is an optional source capability. A source that cannot supply a
-	// compiled XMLTV blob leaves h.epg unset; report that plainly, naming the
-	// active source, instead of dereferencing a nil service.
-	if h.epg == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": source.UnsupportedEPGError(h.src.Name()).Error()})
+	// compiled XMLTV blob leaves the service unset; report that plainly, naming
+	// the active source, instead of dereferencing a nil service. The service is
+	// loaded once so a concurrent swap cannot change it between the nil check
+	// and the call.
+	svc := h.epg.Load()
+	if svc == nil {
+		c.JSON(http.StatusNotImplemented, gin.H{"error": source.UnsupportedEPGError(h.src().Name()).Error()})
 		return
 	}
 
 	id := c.Param("id")
-	channel, err := h.src.GetChannel(id)
+	channel, err := h.src().GetChannel(id)
 	if err != nil {
 		writeSourceError(c, err, "Channel not found")
 		return
@@ -573,7 +618,7 @@ func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 		return
 	}
 
-	result := h.epg.GetForChannel(*channel.EpgChannelID)
+	result := svc.GetForChannel(*channel.EpgChannelID)
 	c.JSON(http.StatusOK, result)
 }
 
@@ -595,9 +640,12 @@ var (
 // whole boundary.
 func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
 	scanMgrOnce.Do(func() {
-		lister, ok := h.src.(source.StreamProbeLister)
+		// Load the source once: a swap between the assertion and Name() would
+		// otherwise let the error name a different adapter than the one tested.
+		src := h.src()
+		lister, ok := src.(source.StreamProbeLister)
 		if !ok {
-			scanMgrErr = source.UnsupportedScanError(h.src.Name())
+			scanMgrErr = source.UnsupportedScanError(src.Name())
 			return
 		}
 		scanMgrPtr.Store(scanner.NewManager(lister))

@@ -18,11 +18,12 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
+	"github.com/jmvbambico/adoboflix/internal/playlistcode"
 	"github.com/jmvbambico/adoboflix/internal/source"
+	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	"github.com/joho/godotenv"
 
 	// Adapters register themselves with internal/source from their init.
-	_ "github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	_ "github.com/jmvbambico/adoboflix/internal/source/file"
 	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
@@ -65,6 +66,14 @@ func main() {
 		log.Fatalf("Source configuration: %v", err)
 	}
 
+	// The playlist code a subscriber enters in the UI persists to a local file
+	// the server owns. A stored code wins over ADOBOFLIX_ADOBOTV_PLAYLIST_CODE;
+	// the environment variable is the fallback used only when nothing has been
+	// stored. A UI-entered code is the user's most recent explicit instruction,
+	// and a stale .env silently overriding it would make the UI look broken.
+	// docs/source-adapters.md states this.
+	codeStore := playlistcode.New(playlistcode.DefaultPath())
+
 	// Open a database connection only when the selected adapter declared it
 	// needs one. adobotv-http and file read no SQL handle at all, so a user
 	// with no AdoboTV database can run them; only postgres-direct reads the
@@ -78,6 +87,23 @@ func main() {
 		}
 		defer database.Close()
 		cfg.DB = database.DB
+	}
+
+	// Resolve the playlist code for a source that needs one. A malformed code
+	// file is fatal: a truncated credential must not be silently ignored. With
+	// neither a stored nor an environment code the source opens unconfigured,
+	// and the user supplies one through /api/v1/source/playlist-code — that is
+	// the point of the feature, so it is a valid state, not an error.
+	envPlaylistCode := os.Getenv(adobotvhttp.EnvPlaylistCode)
+	if source.NeedsPlaylistCode(sourceName) {
+		code, configured, err := codeStore.Resolve(envPlaylistCode)
+		if err != nil {
+			log.Fatalf("Playlist code store: %v", err)
+		}
+		cfg.PlaylistCode = code
+		if !configured {
+			log.Printf("[source] %q has no playlist code yet; enter one at POST /api/v1/source/playlist-code", sourceName)
+		}
 	}
 
 	// Open the selected source adapter. Handlers only ever see this interface.
@@ -107,6 +133,14 @@ func main() {
 		log.Printf("[EPG] source %q does not provide EPG data; the EPG endpoint will report it as unavailable", sourceName)
 	}
 
+	// The playlist-code endpoints share the player's source so a swap takes
+	// effect for every content route at once. The handler resolves the code
+	// itself on each call, so it is handed the configuration with no code in it
+	// rather than a copy of the credential.
+	sourceCfg := cfg
+	sourceCfg.PlaylistCode = ""
+	sourceHandler := handler.NewSourceHandler(playerHandler, codeStore, sourceCfg, envPlaylistCode)
+
 	// API routes
 	api := r.Group("/api/v1")
 	{
@@ -130,6 +164,14 @@ func main() {
 		api.POST("/channels/scan", playerHandler.ScanChannels)
 		api.GET("/channels/scan/status", playerHandler.ScanStatus)
 		api.GET("/channels/scan/report", playerHandler.ScanReport)
+
+		// Source routes. These accept a subscriber credential and write it to a
+		// local file the server owns; they never return it. Unauthenticated,
+		// like the rest of /api/v1 — see "Stream URL exposure" in
+		// docs/source-adapters.md before exposing this server beyond loopback.
+		api.GET("/source/status", sourceHandler.GetStatus)
+		api.POST("/source/playlist-code", sourceHandler.SetPlaylistCode)
+		api.DELETE("/source/playlist-code", sourceHandler.DeletePlaylistCode)
 	}
 
 	// Serve built client assets.
