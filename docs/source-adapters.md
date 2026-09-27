@@ -13,9 +13,9 @@ live `settings` table — the surprises are marked.
 
 | Adapter | For | Database | Status |
 |---|---|---|---|
-| `adobotv-http` | A subscriber with an AdoboTV account | none | The real path |
-| `file` | Someone with no account and their own playlist | none | Supported |
-| `postgres-direct` | Verifying the player itself | **required** | **Development harness only** |
+| `adobotv-http` | A subscriber with an AdoboTV account | none | The real path — **Login to AdoboTV** |
+| `file` | Someone with no account and their own playlist | none | Supported — **Import Local Playlist** |
+| `postgres-direct` | Verifying the player itself | **required** | **Development harness only, not a user choice** |
 
 Only `postgres-direct` needs `ADOBOFLIX_PG_URL`. Each adapter declares its need
 at registration (`source.Register`) and the server opens a database connection
@@ -24,10 +24,43 @@ handle at all and never dial one. That is the main practical reason to choose
 `file` — the person it exists for has no AdoboTV account, and usually no AdoboTV
 database either.
 
+The first two are the two use cases in `AGENTS.md`, and they are the two
+**selectable** adapters: they are what the UI offers. `postgres-direct` is
+marked `Dev` and deliberately **not** selectable. It is reachable only through
+`ADOBOFLIX_SOURCE=postgres-direct` — which is now the *only* route to it, so it
+stays behind explicit configuration more firmly than before.
+
 `postgres-direct` exists today and is what proved DASH+Clearkey playback works
 end to end. It bypasses entitlement, device authorisation, and every analytics
-event AdoboTV records. It must stay behind explicit configuration and must
-never become the default. See [Why not the database](#why-not-the-database).
+event AdoboTV records. See [Why not the database](#why-not-the-database).
+
+## How the active source is chosen
+
+`ADOBOFLIX_SOURCE` is an **override**, not the only way in. The order is:
+
+| Source of the choice | Used when |
+|---|---|
+| `ADOBOFLIX_SOURCE` | it is set — it pins the source and wins, and it is the only way to select a dev adapter |
+| the mode the user chose in the UI, remembered in `ADOBOFLIX_SOURCE_MODE_FILE` (default `.adoboflix/source-mode`) | `ADOBOFLIX_SOURCE` is unset and a mode is stored |
+| neither | the server boots with **no source** |
+
+Booting with no source is a **valid state, not an error**. It is the opposite
+of a silent fallback: `/api/v1/source/status` reports it, the UI offers the two
+selectable modes, and every content route answers `409 source_not_configured`
+until one is chosen. Only a `Selectable` adapter can be remembered as a mode; a
+hand-edited file naming a dev adapter is refused, not opened.
+
+The remembered mode is the user's most recent explicit instruction, so it wins
+over nothing but the override — the same precedence shape the playlist code
+uses. A malformed mode file is a startup error, never a silent default.
+
+A stored mode that *resolves* but whose adapter will not open is a different
+case: it is user state, so the server falls back to **no source** rather than
+exiting, logging why, and the chooser lets the user import or log in again. (A
+stored `file` mode with no playlist stored — a state a crash or a failed
+compensation can leave behind — is the common way in.) An env-pinned source
+that will not open is still **fatal**: that is explicit operator configuration,
+and silently substituting the chooser would hide a broken deployment.
 
 ---
 
@@ -261,12 +294,25 @@ the check entirely.
 
 ---
 
-## Entering the playlist code at runtime
+## Choosing a mode at runtime
 
-`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply the credential.
-The subscriber can enter it through the API while the server runs, and it is
-stored in a **local file the server owns** — never in the browser, and never
-upstream.
+The two selectable paths can be chosen while the server runs, instead of editing
+`.env` and restarting:
+
+- **Login to AdoboTV** — enter a playlist code (`POST
+  /api/v1/source/playlist-code`). Entering a code **selects the `adobotv-http`
+  mode** whether the server is sourceless, already on `adobotv-http`, or on
+  `file`.
+- **Import Local Playlist** — upload a playlist (`POST
+  /api/v1/source/playlist-file`). Importing **selects the `file` mode**.
+
+Both are refused with `409 source_pinned_by_env` when `ADOBOFLIX_SOURCE` pins a
+different source: the override is the only way to a dev adapter, so the UI must
+not fight it.
+
+The playlist code arrives through the API while the server runs and is stored in
+a **local file the server owns** — never in the browser, and never upstream.
+`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply it.
 
 ### Precedence — the file wins
 
@@ -287,12 +333,31 @@ entered. Clearing the stored code falls back to the environment variable again.
 
 ```
 GET    /api/v1/source/status
-  -> { "source": "...", "needs_playlist_code": bool,
-       "playlist_code_configured": bool }      # never the code
+  -> { "source": "adobotv-http" | "file" | "",   # active adapter, "" when none
+       "active": bool,
+       "origin": "env" | "stored" | "none",
+       "dev": bool,                              # a harness the UI hides
+       "needs_playlist_code": bool,
+       "playlist_code_configured": bool,
+       "playlist_file_configured": bool,
+       "playlist_imported_at": "RFC3339",   # only when imported here; omitted otherwise
+       "modes": [ { "name", "selectable", "dev",
+                    "active", "configured", "needs_playlist_code" } ] }
+       # never the code, and the account facts when the adapter can supply them
 
 POST   /api/v1/source/playlist-code    {"code": "..."}
 DELETE /api/v1/source/playlist-code
+POST   /api/v1/source/playlist-file    <the playlist content: JSON or M3U>
+DELETE /api/v1/source/playlist-file
 ```
+
+`status` is what the menu renders from, so the client never has to hardcode
+adapter names: `modes` lists every registered adapter with the flags to decide
+what to offer (`selectable`, `dev`) and whether it is ready to open
+(`configured`). `origin` says whether the active source came from the
+environment override or a stored choice, so the UI knows when the choice is not
+its to make. It stays fast, local and cancellable: the account facts are read
+from cache only, never fetched.
 
 `POST` **validates before persisting**: it opens a candidate adapter and makes
 one cheap real call — the playlist envelope — so a wrong code fails here rather
@@ -307,7 +372,48 @@ The client already branches on those; no parallel vocabulary is introduced.
 
 `DELETE` clears the stored code and reopens the adapter from what remains (the
 environment fallback, or the unconfigured state). Clearing nothing is not an
-error.
+error. The chosen mode is left alone — the user still wants the login path,
+they have simply removed its credential.
+
+### Importing a playlist file
+
+`POST /api/v1/source/playlist-file` takes the playlist content as the request
+body and **validates it before persisting anything**, exactly as the
+playlist-code endpoint does: the bytes are written to a scratch file and parsed
+by the **real `file` adapter**. Only once they parse does the store persist the
+playlist under `ADOBOFLIX_PLAYLIST_FILE` (default `.adoboflix/playlist`, mode
+`0600`, atomic temp+rename, read back to verify), the mode is remembered, and
+the live source is swapped to `file`. On any failure **nothing is persisted and
+nothing is swapped**.
+
+Both formats the adapter supports are accepted: the JSON envelope above, and
+M3U/M3U8. The server must name the stored file, and the adapter chooses its
+parser by extension, so the extension is picked from the content's shape (`{` /
+`[` → `.json`; a `#` directive or `#EXTM3U`/`#EXTINF` → `.m3u`). That is a
+two-way choice between the adapter's only two formats, not a third parser: a
+wrong guess still fails loudly in the adapter's own parser.
+
+**The rejection is the feature.** A user who got the format wrong must learn
+*what* was wrong, so a malformed upload returns `400 invalid_playlist` with the
+parser's own reason, the format it tried, and a pointer to the documented
+format:
+
+```json
+{
+  "error": "the playlist could not be parsed as JSON: unexpected end of JSON input. See the documented format in docs/source-adapters.md.",
+  "code": "invalid_playlist"
+}
+```
+
+The request body is capped at **10 MiB** (`413 playlist_too_large`): parsing is
+in-memory, and an unbounded upload on a loopback service is a denial of service
+worth refusing.
+
+`DELETE /api/v1/source/playlist-file` clears the imported playlist. If it was
+the active source, the remembered mode is cleared with it and the server returns
+to the sourceless state — a stored mode pointing at a file that is gone would
+otherwise fail to open on the next boot. An env-pinned source is left running:
+it reads `ADOBOFLIX_FILE_PATH`, not the imported file.
 
 ### Which failures keep the code
 
@@ -361,9 +467,10 @@ The active source sits behind an atomic pointer. Reads are hot and swaps are
 rare, so the load path is a single atomic operation with no lock, and an
 in-flight request keeps whichever source it loaded — a swap can never race it.
 `PlayerHandler` reads the source only through one accessor, so a swap reaches
-every content route at once. Entering a code is the only thing that swaps; when
-the active source takes no playlist code (`file`, `postgres-direct`), `POST`
-answers `409 playlist_code_not_supported` and nothing is swapped.
+every content route at once. Entering a code is the only thing that swaps: the
+code implies the `adobotv-http` mode, so `POST /source/playlist-code` validates
+it against AdoboTV and then persists and swaps, whatever source was active
+before. Importing a playlist likewise selects the `file` mode.
 
 ### The credential is write-only
 
@@ -420,10 +527,14 @@ the client's.
 For the second user in `AGENTS.md`: someone with **no AdoboTV account** who
 already has a playlist and just wants AdoboFlix to play it. Point
 `ADOBOFLIX_FILE_PATH` at a local playlist — JSON or M3U — and the repo boots
-into the same player the subscriber path uses. The player never learns where the
+into the same player the subscriber path uses, or import the playlist through
+the UI, which stores it under `ADOBOFLIX_PLAYLIST_FILE` and selects this mode.
+An explicit path (the imported one) wins over `ADOBOFLIX_FILE_PATH`, the same
+precedence shape the playlist code uses. The player never learns where the
 content came from.
 
-The adapter reads the file **once, at startup**, into an in-memory library, and
+The adapter reads the file **once, when it is opened** — at startup, or when an
+import swaps it in — into an in-memory library, and
 every query answers from that value. It never writes the file, imports no SQL
 package, and never touches the database — the server opens no connection for it
 at all, and `source.Config.DB` arrives nil. The read-only invariants hold
@@ -781,7 +892,14 @@ help the second and third, but both are the owner's decision, not the adapter's
 
 | Key | Required | Meaning |
 |---|---|---|
-| `ADOBOFLIX_FILE_PATH` | yes | Path to the playlist (`.json`, `.m3u` or `.m3u8`). Unset, unreadable, or an unknown extension is a startup error. |
+| `ADOBOFLIX_FILE_PATH` | conditional | Path to a playlist already on disk (`.json`, `.m3u` or `.m3u8`). Used when nothing has been imported. With neither, opening the mode fails naming this key. |
+| `ADOBOFLIX_PLAYLIST_FILE` | no | Where a playlist imported through the UI is stored (default `.adoboflix/playlist`; the extension is added from the detected format). |
+
+An **explicit path** — the one the server chose for an import — wins over
+`ADOBOFLIX_FILE_PATH`, so a stale environment value cannot override what the
+user just imported. `source.Config.FilePath` carries it, additively, exactly as
+`source.Config.PlaylistCode` carries a credential; no adapter gained a write
+method.
 
 ---
 

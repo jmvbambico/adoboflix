@@ -19,12 +19,16 @@ import (
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
 	"github.com/jmvbambico/adoboflix/internal/playlistcode"
+	"github.com/jmvbambico/adoboflix/internal/playlistfile"
 	"github.com/jmvbambico/adoboflix/internal/source"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
+	"github.com/jmvbambico/adoboflix/internal/source/file"
+	"github.com/jmvbambico/adoboflix/internal/sourcemode"
 	"github.com/joho/godotenv"
 
-	// Adapters register themselves with internal/source from their init.
-	_ "github.com/jmvbambico/adoboflix/internal/source/file"
+	// Adapters register themselves with internal/source from their init. file is
+	// imported by name because main reads its environment key; postgres-direct
+	// registers itself and nothing here references it.
 	_ "github.com/jmvbambico/adoboflix/internal/source/postgresdirect"
 )
 
@@ -58,13 +62,23 @@ func main() {
 		log.Printf("[env] no .env file found, using environment variables")
 	}
 
-	// Select the content source before touching the database. There is no
-	// default: an unset ADOBOFLIX_SOURCE is a startup error, never a silent
-	// fallback to the postgres-direct development tap.
-	sourceName := os.Getenv(source.EnvSource)
-	if err := source.Validate(sourceName); err != nil {
+	// Choose the content source before touching the database.
+	//
+	// ADOBOFLIX_SOURCE is the override: when it is set it pins the source and
+	// wins, and it is the only way to reach postgres-direct. When it is unset
+	// the server uses the mode the user chose in the UI (remembered locally,
+	// the same way the playlist code is). With neither, the server boots with
+	// no source at all — which is the opposite of a silent fallback: it offers
+	// the user the two real paths. Since env is now the only route to
+	// postgres-direct, "behind explicit configuration, never the default" holds
+	// harder than before, not weaker.
+	envSource := os.Getenv(source.EnvSource)
+	modeStore := sourcemode.New(sourcemode.DefaultPath())
+	resolution, err := modeStore.Resolve(envSource)
+	if err != nil {
 		log.Fatalf("Source configuration: %v", err)
 	}
+	sourceName := resolution.Mode
 
 	// The playlist code a subscriber enters in the UI persists to a local file
 	// the server owns. A stored code wins over ADOBOFLIX_ADOBOTV_PLAYLIST_CODE;
@@ -73,6 +87,14 @@ func main() {
 	// and a stale .env silently overriding it would make the UI look broken.
 	// docs/source-adapters.md states this.
 	codeStore := playlistcode.New(playlistcode.DefaultPath())
+
+	// An imported playlist persists to a local file the server owns, so the
+	// file adapter can be pointed at something the user pasted rather than a
+	// path they had to arrange themselves.
+	fileStore := playlistfile.New(playlistfile.DefaultPath())
+
+	envPlaylistCode := os.Getenv(adobotvhttp.EnvPlaylistCode)
+	envFilePath := os.Getenv(file.EnvPath)
 
 	// Open a database connection only when the selected adapter declared it
 	// needs one. adobotv-http and file read no SQL handle at all, so a user
@@ -94,7 +116,6 @@ func main() {
 	// neither a stored nor an environment code the source opens unconfigured,
 	// and the user supplies one through /api/v1/source/playlist-code — that is
 	// the point of the feature, so it is a valid state, not an error.
-	envPlaylistCode := os.Getenv(adobotvhttp.EnvPlaylistCode)
 	if source.NeedsPlaylistCode(sourceName) {
 		code, configured, err := codeStore.Resolve(envPlaylistCode)
 		if err != nil {
@@ -106,12 +127,31 @@ func main() {
 		}
 	}
 
+	// Point the file adapter at the imported playlist when one is stored; with
+	// none, the adapter's own factory falls back to ADOBOFLIX_FILE_PATH.
+	if source.NeedsPlaylistFile(sourceName) {
+		if p := fileStore.Path(); p != "" {
+			cfg.FilePath = p
+		}
+	}
+
 	// Open the selected source adapter. Handlers only ever see this interface.
-	playerSource, err := source.Open(cfg)
+	// The boot policy distinguishes operator configuration from user state; see
+	// openBootSource. A stored mode that will not open is not fatal, so a mode
+	// stranded by a crash or a failed compensation cannot stop the server from
+	// starting and offering the chooser again.
+	playerSource, err := openBootSource(cfg, resolution.Origin == sourcemode.OriginEnv, source.Open)
 	if err != nil {
 		log.Fatalf("Failed to open source %q: %v", sourceName, err)
 	}
-	log.Printf("[source] using %q", sourceName)
+	if playerSource.Name() == "" {
+		sourceName = ""
+		log.Printf("[source] no source configured; choose one at POST /api/v1/source/playlist-code or POST /api/v1/source/playlist-file")
+	} else if resolution.Origin == sourcemode.OriginEnv {
+		log.Printf("[source] using %q (pinned by %s)", sourceName, source.EnvSource)
+	} else {
+		log.Printf("[source] using %q (chosen in the UI)", sourceName)
+	}
 
 	// Setup Gin router
 	gin.SetMode(gin.ReleaseMode)
@@ -133,13 +173,24 @@ func main() {
 		log.Printf("[EPG] source %q does not provide EPG data; the EPG endpoint will report it as unavailable", sourceName)
 	}
 
-	// The playlist-code endpoints share the player's source so a swap takes
-	// effect for every content route at once. The handler resolves the code
-	// itself on each call, so it is handed the configuration with no code in it
-	// rather than a copy of the credential.
+	// The source endpoints share the player's source so a swap takes effect for
+	// every content route at once. The handler resolves the credential and the
+	// playlist path itself on each call, so it is handed the configuration with
+	// no code and no path in it rather than a copy of either.
 	sourceCfg := cfg
+	sourceCfg.Name = ""
 	sourceCfg.PlaylistCode = ""
-	sourceHandler := handler.NewSourceHandler(playerHandler, codeStore, sourceCfg, envPlaylistCode)
+	sourceCfg.FilePath = ""
+	sourceHandler := handler.NewSourceHandler(handler.SourceHandlerOptions{
+		Player:          playerHandler,
+		Config:          sourceCfg,
+		CodeStore:       codeStore,
+		ModeStore:       modeStore,
+		FileStore:       fileStore,
+		EnvPlaylistCode: envPlaylistCode,
+		EnvFilePath:     envFilePath,
+		EnvSource:       envSource,
+	})
 
 	// API routes
 	api := r.Group("/api/v1")
@@ -165,13 +216,17 @@ func main() {
 		api.GET("/channels/scan/status", playerHandler.ScanStatus)
 		api.GET("/channels/scan/report", playerHandler.ScanReport)
 
-		// Source routes. These accept a subscriber credential and write it to a
-		// local file the server owns; they never return it. Unauthenticated,
-		// like the rest of /api/v1 — see "Stream URL exposure" in
-		// docs/source-adapters.md before exposing this server beyond loopback.
+		// Source routes. These select one of the two user paths: entering a
+		// playlist code, or importing a playlist. They accept a credential and
+		// write it, and an imported playlist, to local files the server owns;
+		// they never return the credential. Unauthenticated, like the rest of
+		// /api/v1 — see "Stream URL exposure" in docs/source-adapters.md before
+		// exposing this server beyond loopback.
 		api.GET("/source/status", sourceHandler.GetStatus)
 		api.POST("/source/playlist-code", sourceHandler.SetPlaylistCode)
 		api.DELETE("/source/playlist-code", sourceHandler.DeletePlaylistCode)
+		api.POST("/source/playlist-file", sourceHandler.SetPlaylistFile)
+		api.DELETE("/source/playlist-file", sourceHandler.DeletePlaylistFile)
 	}
 
 	// Serve built client assets.
@@ -225,4 +280,39 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[shutdown] http server: %v", err)
 	}
+}
+
+// openBootSource opens the source the server boots with, applying the policy
+// that separates operator configuration from user state:
+//
+//   - no source at all (an empty name) is the sourceless chooser the UI offers
+//     its two paths from — a valid state, not an error;
+//   - a source that opens is used;
+//   - an env-pinned source that will not open is fatal to the caller. It is
+//     explicit operator configuration, and silently substituting the chooser
+//     would hide a broken deployment;
+//   - a *stored* mode that will not open is user state. The server falls back
+//     to sourceless and logs the real cause, so the user can import or log in
+//     again. It must not exit: a remembered mode can be stranded by a crash or a
+//     failed compensation, and refusing to boot would blame the user for a file
+//     they do not know exists.
+//
+// open is injected so the policy can be tested without a real adapter.
+func openBootSource(
+	cfg source.Config,
+	pinned bool,
+	open func(source.Config) (source.Source, error),
+) (source.Source, error) {
+	if cfg.Name == "" {
+		return source.Unconfigured(), nil
+	}
+	src, err := open(cfg)
+	if err == nil {
+		return src, nil
+	}
+	if pinned {
+		return nil, err
+	}
+	log.Printf("[source] the remembered source %q could not be opened: %v; starting with no source so one can be chosen again", cfg.Name, err)
+	return source.Unconfigured(), nil
 }

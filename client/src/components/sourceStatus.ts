@@ -29,15 +29,46 @@ const COPY: Record<string, SourceStatusCopy> = {
     hint: "You can do this right now — no restart or reinstall needed.",
     retryLabel: "Enter playlist code",
   },
-  // Not the user's to fix by typing: the running source takes no code at all,
-  // which is a choice made by whoever configured AdoboFlix.
-  playlist_code_not_supported: {
-    severity: "blocked",
-    title: "This source has no playlist code",
+  // The sourceless first-run state: no source has been chosen, so every content
+  // route answers with this. It is cleared in this session by choosing one of
+  // the two options on the start screen — hence actionable, not an error.
+  source_not_configured: {
+    severity: "action",
+    title: "No source is connected yet",
     message:
-      "The active AdoboFlix source does not take a playlist code, so there is nothing to enter. AdoboFlix is configured to read a local file or the development database directly.",
-    hint: "Switch the AdoboFlix source to adobotv-http, then reload.",
+      "AdoboFlix has not chosen a content source, so there is no library to load. Connect your AdoboTV account or import a local playlist to continue.",
+    hint: "Pick one of the two options on the start screen — no restart needed.",
+    retryLabel: "Choose a source",
+  },
+  // ADOBOFLIX_SOURCE pins the running source, so the mode-changing endpoints
+  // refuse. Unlike the other blocked codes this is not something the user can
+  // undo from the UI: only the operator's configuration can release it.
+  source_pinned_by_env: {
+    severity: "blocked",
+    title: "The source is pinned by configuration",
+    message:
+      "AdoboFlix is pinned to a content source by its server configuration, so it cannot be changed from here.",
+    hint: "Unset ADOBOFLIX_SOURCE and restart AdoboFlix to choose a source in the UI.",
     retryLabel: "Reload",
+  },
+  // Import rejection. The server's own message carries the parse cause and the
+  // pointer to the documented format, so the import UI renders that verbatim
+  // and this copy is the fallback for a rejection with no message body.
+  invalid_playlist: {
+    severity: "blocked",
+    title: "That playlist could not be read",
+    message: "The file you chose is not a playlist AdoboFlix can read.",
+    hint: "Fix the file as described in docs/source-adapters.md, then import it again.",
+    retryLabel: "Choose another file",
+  },
+  // Import rejection for size. The 10 MiB cap is the server's, and the message
+  // names it, so the fix is a smaller or split file.
+  playlist_too_large: {
+    severity: "blocked",
+    title: "That playlist file is too large",
+    message: "The file exceeds the 10 MiB import limit, so AdoboFlix did not read it.",
+    hint: "Import a smaller playlist, or split this one and import it in parts.",
+    retryLabel: "Choose another file",
   },
   device_pending: {
     severity: "action",

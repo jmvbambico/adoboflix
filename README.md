@@ -28,13 +28,14 @@ content came from.
 
 ## Quick start
 
-Prerequisites: Go 1.21+, Node.js 18+, and a PostgreSQL database (the AdoboTV
-schema, or your own).
+Prerequisites: Go 1.21+ and Node.js 18+. A PostgreSQL database is needed only
+for the `postgres-direct` development harness; login and local-playlist users
+read no database.
 
 ```bash
 git clone https://github.com/jmvbambico/adoboflix.git
 cd adoboflix
-cp .env.example .env          # then set ADOBOFLIX_PG_URL
+cp .env.example .env          # then choose a source in the UI, or pin one
 
 cd client && npm ci --include=dev && npm run build && cd ..
 
@@ -56,17 +57,33 @@ Configuration is via environment variables (`.env`, documented in
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `ADOBOFLIX_SOURCE` | — | **Override.** Pins the source and wins. The only way to select `postgres-direct`. |
+| `ADOBOFLIX_SOURCE_MODE_FILE` | `.adoboflix/source-mode` | Where the source mode chosen in the UI is remembered |
 | `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required by `postgres-direct`) |
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
-| `ADOBOFLIX_SOURCE` | — | Source adapter: `adobotv-http`, `file`, or `postgres-direct` |
 | `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
 | `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (optional; the UI can enter one instead) |
 | `ADOBOFLIX_PLAYLIST_CODE_FILE` | `.adoboflix/playlist-code` | Where a UI-entered playlist code is stored (0600) |
-| `ADOBOFLIX_FILE_PATH` | — | Playlist JSON path (required by `file`) |
+| `ADOBOFLIX_PLAYLIST_FILE` | `.adoboflix/playlist` | Where a UI-imported playlist is stored (0600); the extension is added per format |
+| `ADOBOFLIX_FILE_PATH` | — | Playlist path used by `file` when nothing has been imported |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
 | `SERVER_PORT` | `5656` | Port |
 
 The CLI flags `--host` and `--port` override `SERVER_HOST` / `SERVER_PORT`.
+
+### Choosing a source
+
+A source is chosen one of three ways, in this order:
+
+1. **`ADOBOFLIX_SOURCE`** — the override. When set it pins the source and wins,
+   and it is the only way to reach `postgres-direct`.
+2. **A mode picked in the UI** — remembered in `ADOBOFLIX_SOURCE_MODE_FILE`.
+   This is the normal path: **Login to AdoboTV** (the subscriber path) or
+   **Import Local Playlist** (no account).
+3. **Neither** — the server boots with **no source**. That is a valid state, not
+   an error: `/api/v1/source/status` reports it and the UI offers the two
+   choices. Until one is chosen every content route answers
+   `409 source_not_configured`.
 
 ### The playlist code
 
@@ -83,6 +100,16 @@ all in this state, and the code-entry screen supplies one while it runs — no
 edit-and-restart. Clearing the stored code (DELETE `/api/v1/source/playlist-code`)
 falls back to the environment variable again. The code is never logged and
 never returned by any endpoint, not even masked.
+
+### Importing a playlist
+
+`POST /api/v1/source/playlist-file` accepts a playlist (the documented JSON
+envelope, or M3U/M3U8) and stores it in `ADOBOFLIX_PLAYLIST_FILE`. It is parsed
+by the real `file` adapter **before** anything is persisted, so a playlist that
+does not parse is rejected with an error naming what was wrong, and neither the
+file nor the mode is written. On success the source switches to `file`, and the
+choice is remembered. `DELETE` clears the imported playlist; if it was the
+active source, the server returns to the sourceless state above.
 
 The bind address defaults to **loopback**. `/api/v1/proxy` is an
 unauthenticated fetcher and `/api/v1/resolve` returns the upstream CDN URL, so
@@ -103,16 +130,18 @@ declares its requirement at registration and the server opens a database
 connection only when the selected one asks for it: `adobotv-http` and `file`
 need no database and never dial one.
 
-Source adapters are interchangeable and read-only:
+Source adapters are interchangeable and read-only. Two of them are the user
+paths from `AGENTS.md`:
 
-- **`adobotv-http`** — production path; talks to AdoboTV over HTTP using the
-  user's playlist code. Needs no database.
-- **`file`** — a local playlist JSON file for users with no account. It is
-  read once at startup and never written, and it touches no database. (M3U is
-  not implemented yet; see `docs/source-adapters.md`.)
+- **`adobotv-http`** — the subscriber path (**Login to AdoboTV**); talks to
+  AdoboTV over HTTP using the user's playlist code. Needs no database.
+- **`file`** — the no-account path (**Import Local Playlist**); a local playlist
+  in JSON or M3U/M3U8. It is read once, never written, and touches no database.
+  It can be imported through the UI or pointed at with `ADOBOFLIX_FILE_PATH`.
 - **`postgres-direct`** — a development test harness only, and the only source
-  that reads the database. It bypasses entitlement and analytics, must stay
-  behind explicit configuration, and is never the default.
+  that reads the database. It bypasses entitlement and analytics. It is **not a
+  user choice**: the UI never offers it, and it is reachable only by setting
+  `ADOBOFLIX_SOURCE=postgres-direct`. See `docs/source-adapters.md`.
 
 ## API
 
@@ -136,9 +165,11 @@ All routes are served under `/api/v1` on the app's own origin.
 | GET | `/api/v1/channels/:id/resolve` | Resolve a channel's default stream |
 | GET | `/api/v1/channels/:id/epg` | EPG entries for a channel |
 | POST | `/api/v1/channels/scan` | **Not implemented** — currently returns `501 Not Implemented` |
-| GET | `/api/v1/source/status` | Active source name; whether it needs a playlist code and whether one is configured (never the code) |
-| POST | `/api/v1/source/playlist-code` | Validate a playlist code against the source, then persist and swap it in |
+| GET | `/api/v1/source/status` | Active source, its origin (env/stored/none), whether it is a dev harness, and the configured state of each mode (never the code) |
+| POST | `/api/v1/source/playlist-code` | Validate a playlist code against the source, then persist it, select the login mode, and swap it in |
 | DELETE | `/api/v1/source/playlist-code` | Clear the stored playlist code |
+| POST | `/api/v1/source/playlist-file` | Validate a playlist (JSON or M3U), then persist it, select the file mode, and swap it in |
+| DELETE | `/api/v1/source/playlist-file` | Clear the imported playlist |
 
 ### Query parameters
 

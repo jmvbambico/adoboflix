@@ -1,6 +1,7 @@
 package source
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -198,5 +199,100 @@ func TestOpenPassesPlaylistCodeToAdapter(t *testing.T) {
 	}
 	if plainGot != "ignored" {
 		t.Errorf("factory received %q; Config is passed through verbatim", plainGot)
+	}
+}
+
+// Selectable and Dev are declared at registration, so the server derives its
+// UI offers from flags rather than a name check.
+func TestSelectableAndDevFollowRegistration(t *testing.T) {
+	const sel = "test-selectable-adapter"
+	const dev = "test-dev-adapter"
+	Register(sel, Requirement{Selectable: true}, func(Config) (Source, error) { return &fakeSource{}, nil })
+	Register(dev, Requirement{Dev: true}, func(Config) (Source, error) { return &fakeSource{}, nil })
+
+	if !Selectable(sel) {
+		t.Errorf("Selectable(%q) = false, want true", sel)
+	}
+	if Dev(sel) {
+		t.Errorf("Dev(%q) = true, want false", sel)
+	}
+	if Selectable(dev) {
+		t.Errorf("Selectable(%q) = true, want false: a dev adapter is not a user choice", dev)
+	}
+	if !Dev(dev) {
+		t.Errorf("Dev(%q) = false, want true", dev)
+	}
+	if Selectable("no-such-adapter") || Dev("no-such-adapter") {
+		t.Error("an unknown adapter reported Selectable or Dev true")
+	}
+}
+
+// A file-reading adapter declares PlaylistFile the same way one that needs a
+// code declares PlaylistCode.
+func TestNeedsPlaylistFileFollowsRegistration(t *testing.T) {
+	const name = "test-playlist-file-adapter"
+	Register(name, Requirement{PlaylistFile: true}, func(Config) (Source, error) { return &fakeSource{}, nil })
+
+	if !NeedsPlaylistFile(name) {
+		t.Errorf("NeedsPlaylistFile(%q) = false, want true", name)
+	}
+	if NeedsPlaylistFile("no-such-adapter") {
+		t.Error("NeedsPlaylistFile(unknown) = true, want false")
+	}
+}
+
+// Config.FilePath is passed through verbatim, the same way PlaylistCode is.
+func TestOpenPassesFilePathToAdapter(t *testing.T) {
+	const name = "test-file-path-passthrough-adapter"
+	var got string
+	Register(name, Requirement{PlaylistFile: true}, func(cfg Config) (Source, error) {
+		got = cfg.FilePath
+		return &fakeSource{}, nil
+	})
+	if _, err := Open(Config{Name: name, FilePath: "/tmp/imported.json"}); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if got != "/tmp/imported.json" {
+		t.Errorf("factory received %q, want the path passed through unchanged", got)
+	}
+}
+
+// The unconfigured source answers every read with ErrNotConfigured and reports
+// an empty name, which is how status tells "no source" from a real adapter.
+func TestUnconfiguredSourceReportsNotConfigured(t *testing.T) {
+	src := Unconfigured()
+	if src.Name() != "" {
+		t.Errorf("Name = %q, want the empty name", src.Name())
+	}
+	reads := map[string]func() error{
+		"GetStats": func() error { _, err := src.GetStats(); return err },
+		"GetEntries": func() error {
+			_, _, err := src.GetEntries("", "", "", 1, 10)
+			return err
+		},
+		"GetEntry": func() error { _, err := src.GetEntry("x"); return err },
+		"Search": func() error {
+			_, _, err := src.Search("q", "", "", "", 1, 10)
+			return err
+		},
+		"GetProviders":  func() error { _, err := src.GetProviders(); return err },
+		"GetGenres":     func() error { _, err := src.GetGenres(); return err },
+		"EpisodeCounts": func() error { _, err := src.EpisodeCounts([]string{"x"}); return err },
+		"GetVodStreams": func() error { _, err := src.GetVodStreams("x"); return err },
+		"GetEpisodes":   func() error { _, err := src.GetEpisodes("x"); return err },
+		"GetEpisode":    func() error { _, err := src.GetEpisode("x"); return err },
+		"ListChannels": func() error {
+			_, _, err := src.ListChannels("", 10, 0)
+			return err
+		},
+		"ListChannelCategories": func() error { _, err := src.ListChannelCategories(); return err },
+		"GetChannel":            func() error { _, err := src.GetChannel("x"); return err },
+		"GetChannelWithStreams": func() error { _, _, err := src.GetChannelWithStreams("x"); return err },
+		"ResolveChannelStream":  func() error { _, err := src.ResolveChannelStream("x"); return err },
+	}
+	for name, read := range reads {
+		if err := read(); !errors.Is(err, ErrNotConfigured) {
+			t.Errorf("%s error = %v, want ErrNotConfigured", name, err)
+		}
 	}
 }

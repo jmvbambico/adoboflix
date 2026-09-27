@@ -9,8 +9,13 @@ import (
 )
 
 // EnvSource names the environment variable that selects the content source.
-// It has no default: an unset value is a startup error, never a silent
-// fallback to a particular adapter.
+//
+// It is an override, not the only way to choose: when it is set it pins the
+// source and wins, and it is the only way to reach a development adapter such
+// as postgres-direct. When it is unset the server uses the mode the user
+// selected in the UI (see internal/sourcemode); with neither the server boots
+// with no source at all — a valid state the UI offers choices from, not an
+// error and never a silent fallback to a particular adapter.
 const EnvSource = "ADOBOFLIX_SOURCE"
 
 // Config is what an adapter is opened with. Name is the requested adapter;
@@ -28,6 +33,16 @@ type Config struct {
 	// This is additive and read-only: it carries a credential in, never out,
 	// and grants no adapter a write method.
 	PlaylistCode string
+	// FilePath is an explicit playlist path for an adapter that declared
+	// Requirement{PlaylistFile: true} — the path the server chose for a
+	// playlist the user imported, as opposed to the path in the adapter's own
+	// environment key. When empty such an adapter falls back to that key; when
+	// a path is supplied here it wins, the same precedence shape PlaylistCode
+	// uses. An adapter that reads no playlist file ignores this field entirely.
+	//
+	// This is additive and read-only: it points an adapter at a file to read,
+	// never at a file to write, and grants no adapter a write method.
+	FilePath string
 }
 
 // Factory opens an adapter from a Config.
@@ -45,6 +60,22 @@ type Requirement struct {
 	// offers the code-entry endpoints only for a source that declares it, the
 	// same way it opens a database only for one that asks.
 	PlaylistCode bool
+	// PlaylistFile is true when the adapter reads a local playlist file the
+	// user can point it at (file). It mirrors PlaylistCode: the server offers
+	// the playlist-import endpoints only for a source that declares it, and
+	// reports whether such a file is configured for it.
+	PlaylistFile bool
+	// Selectable is true when a normal user may choose this adapter as their
+	// content source. The two end-user paths in AGENTS.md — a subscriber
+	// connecting an account, and someone importing their own playlist — are
+	// exactly the selectable adapters; the server derives the choices it offers
+	// from these flags rather than hardcoding adapter names.
+	Selectable bool
+	// Dev is true for a development-only harness the UI must never present as a
+	// normal option (postgres-direct). It is reachable only through the
+	// ADOBOFLIX_SOURCE override, which is what keeps it out of the user's
+	// choices without making it unreachable.
+	Dev bool
 }
 
 // registration is a factory plus what it declared it needs.
@@ -74,8 +105,11 @@ func Available() []string {
 	return names
 }
 
-// Validate reports whether name selects a usable adapter. An empty name is a
-// configuration error, not a default: AdoboFlix refuses to guess a source.
+// Validate reports whether name selects a usable adapter. An empty name is not
+// a usable adapter and is rejected here, but an empty name is a valid *server*
+// state — booting with no source so the UI can offer the choices — and callers
+// that allow it handle "" themselves rather than passing it here. AdoboFlix
+// never guesses a source from an empty name.
 func Validate(name string) error {
 	if strings.TrimSpace(name) == "" {
 		return fmt.Errorf("%s is not set: set it explicitly to choose a content source (available: %s)",
@@ -102,6 +136,30 @@ func NeedsDatabase(name string) bool {
 func NeedsPlaylistCode(name string) bool {
 	reg, ok := factories[name]
 	return ok && reg.requirement.PlaylistCode
+}
+
+// NeedsPlaylistFile reports whether the adapter registered under name reads a
+// local playlist file the user can point it at. It is meaningful for a name
+// Validate accepts; an unknown name reports false.
+func NeedsPlaylistFile(name string) bool {
+	reg, ok := factories[name]
+	return ok && reg.requirement.PlaylistFile
+}
+
+// Selectable reports whether a normal user may choose the adapter registered
+// under name as their content source. An unknown name reports false, so a
+// remembered mode that no longer exists is not offered.
+func Selectable(name string) bool {
+	reg, ok := factories[name]
+	return ok && reg.requirement.Selectable
+}
+
+// Dev reports whether the adapter registered under name is a development-only
+// harness the UI must not present as a normal option. An unknown name reports
+// false.
+func Dev(name string) bool {
+	reg, ok := factories[name]
+	return ok && reg.requirement.Dev
 }
 
 // Open validates cfg and opens the selected adapter. An adapter that declared

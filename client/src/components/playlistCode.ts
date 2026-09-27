@@ -22,6 +22,18 @@ import { describeSourceError, type SourceStatusCopy } from "./sourceStatus";
 // the underlying status query is shared through React Query's cache.
 export const SOURCE_STATUS_QUERY_KEY = ["source-status"] as const;
 
+// useSourceStatus is the one status read. The gate, the account menu and the
+// dashboard's decision to show the library or the chooser all mount it; React
+// Query's shared cache means the server is asked once. It is separate from the
+// controller so a caller that only needs to read status — the dashboard — does
+// not also build the submit and clear mutations.
+export function useSourceStatus() {
+  return useQuery<SourceStatus>({
+    queryKey: SOURCE_STATUS_QUERY_KEY,
+    queryFn: fetchSourceStatus,
+  });
+}
+
 // Codes for which the server kept the submitted code: it proved the code itself
 // valid and only a gate outside the code's control remains. This mirrors
 // playlistCodeProvenValid in internal/handler/source_control.go — the two must
@@ -66,10 +78,7 @@ export function usePlaylistCodeController() {
   const queryClient = useQueryClient();
   const [outcome, setOutcome] = useState<PlaylistCodeOutcome>(null);
 
-  const statusQuery = useQuery<SourceStatus>({
-    queryKey: SOURCE_STATUS_QUERY_KEY,
-    queryFn: fetchSourceStatus,
-  });
+  const statusQuery = useSourceStatus();
 
   const submit = useMutation<SourceStatus, unknown, string>({
     mutationFn: (value: string) => setPlaylistCode(value),

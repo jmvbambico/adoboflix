@@ -25,6 +25,7 @@ import CustomPlayer from "./CustomPlayer";
 import GlowBackground from "./GlowBackground";
 import SourceStatusPanel from "./SourceStatusPanel";
 import PlaylistCodeGate from "./PlaylistCodeGate";
+import { useSourceStatus } from "./playlistCode";
 import { describeChannelStatus } from "./channelStatus";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
@@ -36,6 +37,12 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 
 export default function Dashboard() {
   const queryClient = useQueryClient();
+
+  // Source status decides whether the page shows the library or the first-run
+  // chooser. It shares the one status cache with the account menu and the gate.
+  const { data: sourceStatus } = useSourceStatus();
+  const sourceResolved = sourceStatus !== undefined;
+  const sourceActive = Boolean(sourceStatus?.active);
 
   // Search & Category states
   const [searchQuery, setSearchQuery] = useState("");
@@ -417,7 +424,12 @@ export default function Dashboard() {
             a saved-code notice after a gated connect, or a compact clear
             control when a code is already configured. */}
         <PlaylistCodeGate errors={[videosError, iptvError, channelEPGError, playbackError?.error]} />
-        
+
+        {/* The library is the whole page only once a source is active. With no
+            source the gate above is the primary content — the first-run
+            chooser — and an empty library underneath it would be noise. */}
+        {sourceResolved && sourceActive && (
+          <>
         {/* TAB 1 & ACTIVE DETAIL : IMMERSIVE CUSTOM CORE PLAYER STAGE */}
         <AnimatePresence mode="wait">
           {selectedChannel ? (
@@ -1776,6 +1788,8 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+          </>
+        )}
 
       </main>
     </div>

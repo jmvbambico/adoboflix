@@ -15,8 +15,10 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/playlistcode"
+	"github.com/jmvbambico/adoboflix/internal/playlistfile"
 	"github.com/jmvbambico/adoboflix/internal/source"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
+	"github.com/jmvbambico/adoboflix/internal/sourcemode"
 )
 
 // codeStubSource is a source.Source stub for the playlist-code endpoints. It
@@ -38,9 +40,23 @@ func (s *codeStubSource) ListChannels(string, int, int) ([]source.Channel, int, 
 
 func newTestSourceHandler(t *testing.T, cfg source.Config, envCode string) (*SourceHandler, *PlayerHandler, *playlistcode.Store) {
 	t.Helper()
-	store := playlistcode.New(filepath.Join(t.TempDir(), "playlist-code"))
-	player := NewPlayerHandler(&codeStubSource{name: "initial"})
-	return NewSourceHandler(player, store, cfg, envCode), player, store
+	dir := t.TempDir()
+	store := playlistcode.New(filepath.Join(dir, "playlist-code"))
+	modes := sourcemode.New(filepath.Join(dir, "source-mode"))
+	files := playlistfile.New(filepath.Join(dir, "playlist"))
+	// The live source carries the configured adapter's name so status describes
+	// the same adapter the configuration selected, exactly as the server does
+	// when it opens it.
+	player := NewPlayerHandler(&codeStubSource{name: cfg.Name})
+	h := NewSourceHandler(SourceHandlerOptions{
+		Player:          player,
+		Config:          cfg,
+		CodeStore:       store,
+		ModeStore:       modes,
+		FileStore:       files,
+		EnvPlaylistCode: envCode,
+	})
+	return h, player, store
 }
 
 func sourceControlRouter(h *SourceHandler) *gin.Engine {
@@ -48,6 +64,8 @@ func sourceControlRouter(h *SourceHandler) *gin.Engine {
 	r.GET("/api/v1/source/status", h.GetStatus)
 	r.POST("/api/v1/source/playlist-code", h.SetPlaylistCode)
 	r.DELETE("/api/v1/source/playlist-code", h.DeletePlaylistCode)
+	r.POST("/api/v1/source/playlist-file", h.SetPlaylistFile)
+	r.DELETE("/api/v1/source/playlist-file", h.DeletePlaylistFile)
 	return r
 }
 
@@ -374,12 +392,45 @@ func TestSetPlaylistCodeRejectsEmptyBody(t *testing.T) {
 	}
 }
 
-// The entry path is not offered for a source that takes no code.
-func TestSetPlaylistCodeNotSupportedForNonCodeSource(t *testing.T) {
+// Entering a code selects the login path: with another mode active (here file)
+// and no environment pin, the code switches the source to adobotv-http and
+// remembers the mode, so the user's choice survives a restart.
+func TestSetPlaylistCodeSwitchesFromFileToLogin(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h, _, store := newTestSourceHandler(t, source.Config{Name: "file"}, "")
+	const code = "GOOD-CODE"
+	h, player, _ := newTestSourceHandler(t, source.Config{Name: "file"}, "")
+	candidate := &codeStubSource{name: adobotvhttp.Name}
+	var opened source.Config
+	h.open = func(cfg source.Config) (source.Source, error) {
+		opened = cfg
+		return candidate, nil
+	}
+
+	w := doJSON(t, sourceControlRouter(h), http.MethodPost, "/api/v1/source/playlist-code", `{"code":"`+code+`"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+	if opened.Name != adobotvhttp.Name || opened.PlaylistCode != code {
+		t.Errorf("candidate opened with name=%q code=%q, want %q with the submitted code", opened.Name, opened.PlaylistCode, adobotvhttp.Name)
+	}
+	if player.src() != source.Source(candidate) {
+		t.Error("the source was not swapped to the login path")
+	}
+	mode, ok, err := h.modes.Load()
+	if err != nil || !ok || mode != adobotvhttp.Name {
+		t.Errorf("stored mode = (%q, %v, %v), want %q persisted", mode, ok, err, adobotvhttp.Name)
+	}
+}
+
+// A pinned environment source cannot be switched by the UI: the request is
+// refused, nothing is persisted, and the live source is untouched.
+func TestSetPlaylistCodeRefusedWhenPinned(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, player, store := newTestSourceHandler(t, source.Config{Name: "file"}, "")
+	h.envSource = "file"
+	before := player.src()
 	h.open = func(source.Config) (source.Source, error) {
-		t.Error("the entry path must not open a candidate for a non-code source")
+		t.Error("a pinned source must not open a candidate")
 		return nil, nil
 	}
 
@@ -393,11 +444,14 @@ func TestSetPlaylistCodeNotSupportedForNonCodeSource(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if got.Code != codePlaylistCodeNotSupported {
-		t.Errorf("code = %q, want %q", got.Code, codePlaylistCodeNotSupported)
+	if got.Code != codeSourcePinnedByEnv {
+		t.Errorf("code = %q, want %q", got.Code, codeSourcePinnedByEnv)
 	}
 	if _, ok, _ := store.Load(); ok {
-		t.Error("something was persisted for a non-code source")
+		t.Error("something was persisted for a pinned source")
+	}
+	if player.src() != before {
+		t.Error("a pinned source was swapped")
 	}
 }
 
@@ -412,7 +466,9 @@ func TestDeletePlaylistCodeClearsAndFallsBackToEnv(t *testing.T) {
 	}
 	before := player.src()
 
-	reopened := &codeStubSource{name: "reopened"}
+	// The reopened source carries the adapter's name: status describes the live
+	// adapter, so a stub with an arbitrary name would misreport it.
+	reopened := &codeStubSource{name: adobotvhttp.Name}
 	var openedWith string
 	h.open = func(cfg source.Config) (source.Source, error) {
 		openedWith = cfg.PlaylistCode
@@ -456,7 +512,7 @@ func TestDeletePlaylistCodeLeavesSourceUnconfigured(t *testing.T) {
 	var openedWith = "unset"
 	h.open = func(cfg source.Config) (source.Source, error) {
 		openedWith = cfg.PlaylistCode
-		return &codeStubSource{name: "unconfigured"}, nil
+		return &codeStubSource{name: adobotvhttp.Name}, nil
 	}
 
 	w := doJSON(t, sourceControlRouter(h), http.MethodDelete, "/api/v1/source/playlist-code", "")

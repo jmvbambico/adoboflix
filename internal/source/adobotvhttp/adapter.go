@@ -82,7 +82,9 @@ func init() {
 	// has no database access by construction. The playlist code is taken from
 	// Config when supplied (a code the user entered at runtime) and from the
 	// environment otherwise.
-	source.Register(Name, source.Requirement{PlaylistCode: true}, func(cfg source.Config) (source.Source, error) {
+	// Selectable marks it as one of the two end-user paths in AGENTS.md; it is
+	// never Dev, so the UI presents it as a normal choice.
+	source.Register(Name, source.Requirement{PlaylistCode: true, Selectable: true}, func(cfg source.Config) (source.Source, error) {
 		return newFromEnvWithCode(cfg.PlaylistCode)
 	})
 }
