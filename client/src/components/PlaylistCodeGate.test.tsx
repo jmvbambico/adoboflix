@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client";
+import { ApiError, type SourceStatus } from "../api/client";
 import PlaylistCodeGate from "./PlaylistCodeGate";
+import { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
 
 // A minimal Response the component's api layer can consume. Avoids depending on
 // a global Response being present in the jsdom environment.
@@ -136,14 +137,17 @@ describe("PlaylistCodeGate — entry", () => {
   // Paired with the entry tests: not connected → form; connected → nothing.
   it("renders nothing when a code is already configured", async () => {
     installBackend({ configured: true });
-    const { container } = renderGate();
+    const { container, queryClient } = renderGate();
 
-    // Let the status query settle; the result must still be nothing.
+    // Guarantee the status has actually RESOLVED before measuring. The gate
+    // renders nothing both while loading (status undefined) and when connected,
+    // so an absence on its own would pass on the first tick — before the query
+    // settled — and would stay green even if a configured panel came back.
+    // Waiting for the resolved data makes the emptiness assertion meaningful.
     await waitFor(() =>
-      expect(
-        screen.queryByRole("heading", { name: /playlist code configured/i }),
-      ).not.toBeInTheDocument(),
+      expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toBeDefined(),
     );
+
     expect(container.firstChild).toBeNull();
     // Negative: neither the credential field nor a duplicate clear action.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
@@ -152,10 +156,11 @@ describe("PlaylistCodeGate — entry", () => {
 
   it("renders nothing for a source that takes no playlist code", async () => {
     installBackend({ needs: false, configured: false });
-    const { container } = renderGate();
+    const { container, queryClient } = renderGate();
 
+    // As above: wait for the resolved status, then assert the emptiness.
     await waitFor(() =>
-      expect(screen.queryByRole("heading", { name: /playlist code/i })).not.toBeInTheDocument(),
+      expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toBeDefined(),
     );
     expect(container.firstChild).toBeNull();
   });
@@ -274,11 +279,18 @@ describe("PlaylistCodeGate — saved outcomes", () => {
 
     const remounted = renderGateWith(queryClient);
 
+    // Positive guarantee before the absences: the shared cache really does say
+    // configured, so the emptiness below measures the connected state and not an
+    // unresolved query.
+    expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toMatchObject({
+      playlist_code_configured: true,
+    });
+
     // Negative: an ordinary remount must not resurrect the entry form for a
     // code the server already saved.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
-    // Positive: the connected state is silent — the gate renders nothing, having
-    // no configured panel to show either.
+    // And the connected state is silent — the gate renders nothing, having no
+    // configured panel to show either.
     expect(remounted.container.firstChild).toBeNull();
   });
 });

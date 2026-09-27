@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,10 +109,13 @@ func TestAccountInfoIgnoresUnparseableExpiry(t *testing.T) {
 
 // billed_till "0" is upstream's sentinel for "no expiry to show for this
 // account" — the live AdoboTV returns exactly this alongside a real
-// user_message. It must be treated as absent, never rendered as 1 Jan 1970, and
-// must not suppress the message. A negative value is the same kind of sentinel.
-func TestAccountInfoTreatsNonPositiveBilledTillAsAbsent(t *testing.T) {
-	for _, billedTill := range []string{"0", "-1"} {
+// user_message. The whole 1970 band is indistinguishable from it, so every value
+// below the floor must be treated as absent, never rendered as 1 Jan 1970, and
+// must not suppress the message. "1" and "31535999" (1970-12-31T23:59:59) are
+// the edges of that band.
+func TestAccountInfoRefusesExpiriesBeforeTheFloor(t *testing.T) {
+	before := []string{"0", "-1", "1", "31535999", strconv.FormatInt(minBilledTill-1, 10)}
+	for _, billedTill := range before {
 		t.Run(billedTill, func(t *testing.T) {
 			adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
 				writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, billedTill))
@@ -132,21 +136,31 @@ func TestAccountInfoTreatsNonPositiveBilledTillAsAbsent(t *testing.T) {
 	}
 }
 
-// A genuinely past expiry is real information, not a sentinel: a lapsed
-// subscription must still be reported rather than silently hidden.
-func TestAccountInfoKeepsAPastExpiry(t *testing.T) {
-	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
-		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "1700000000"))
-	})
-	warmEnvelope(t, adapter)
-
-	info, err := adapter.AccountInfo(context.Background())
-	if err != nil {
-		t.Fatalf("AccountInfo: %v", err)
+// The floor is not a recency test: it keeps every plausible past expiry, from
+// the floor itself (2019-01-01) to a clearly real 2023 lapse.
+func TestAccountInfoKeepsPastExpiriesAtOrAboveTheFloor(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want time.Time
+	}{
+		{strconv.FormatInt(minBilledTill, 10), time.Unix(minBilledTill, 0).UTC()},
+		{"1700000000", time.Unix(1700000000, 0).UTC()},
 	}
-	want := time.Unix(1700000000, 0).UTC()
-	if info.SubscriptionExpiresAt == nil || !info.SubscriptionExpiresAt.Equal(want) {
-		t.Errorf("SubscriptionExpiresAt = %v, want the past expiry %v kept", info.SubscriptionExpiresAt, want)
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+				writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, tc.raw))
+			})
+			warmEnvelope(t, adapter)
+
+			info, err := adapter.AccountInfo(context.Background())
+			if err != nil {
+				t.Fatalf("AccountInfo: %v", err)
+			}
+			if info.SubscriptionExpiresAt == nil || !info.SubscriptionExpiresAt.Equal(tc.want) {
+				t.Errorf("SubscriptionExpiresAt = %v, want %v kept", info.SubscriptionExpiresAt, tc.want)
+			}
+		})
 	}
 }
 

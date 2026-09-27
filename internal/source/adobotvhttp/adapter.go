@@ -53,6 +53,20 @@ const Name = "adobotv-http"
 // the provider is the platform itself.
 const sourceType = "adobotv"
 
+// minBilledTill is the earliest billed_till AdoboFlix treats as a real expiry:
+// 2019-01-01T00:00:00Z. Anything earlier is refused as a sentinel rather than
+// rendered as a date.
+//
+// Upstream sends "0" for accounts whose expiry must be hidden, which alone
+// renders as "1 Jan 1970"; but every value through the end of 1970 (1 to
+// 31535999) is equally indistinguishable from that sentinel, and none is a
+// plausible subscription date for a platform that did not exist then. The floor
+// is set far above that band and far below any real AdoboTV subscription, so it
+// never rejects a genuine lapse — a 2019-or-later expiry is real information and
+// is still shown. It is deliberately not an upper bound: a far-future lifetime
+// or reseller expiry is also real.
+const minBilledTill = 1546300800 // 2019-01-01T00:00:00Z
+
 // The adapter must satisfy the read-only boundary, can supply the compiled EPG
 // bytes, and can describe the subscriber's account. It must NOT satisfy
 // StreamProbeLister; that omission is what keeps the optional capability
@@ -571,18 +585,12 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 // billed_till is a string of unix seconds upstream. It is absent for
 // non-subscription tiers, and upstream currently sends "0" — rather than
 // omitting the field — for accounts whose expiry must not be shown (AdoboTV's
-// own hiding task is outstanding). A non-positive value is that sentinel, not a
-// date: time.Unix(0, 0) is 1 Jan 1970, and rendering it would assert an expiry
-// we do not know. So a non-positive value is treated exactly like an absent
-// one, and a value that is present but not a unix-seconds integer likewise,
-// rather than failing the whole call — either way it cannot hide a perfectly
-// good user_message.
-//
-// There is deliberately no upper bound: a legitimate far-future expiry (a
-// lifetime or reseller slot) is real information and must not be rejected. And
-// a genuinely past expiry keeps its real value — a lapsed subscription is
-// something the user should see, which is different from "upstream told us
-// nothing".
+// own hiding task is outstanding). A value below minBilledTill is treated as
+// that sentinel rather than a date, because rendering it would assert an expiry
+// we do not know (see minBilledTill); so is a value that is present but not a
+// unix-seconds integer. Either way it is treated exactly like an absent field
+// and cannot hide a perfectly good user_message. A real expiry — past or future
+// — keeps its value: a lapsed subscription is information, not silence.
 func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return source.AccountInfo{}, err
@@ -593,7 +601,7 @@ func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
 	}
 	info := source.AccountInfo{UserMessage: strings.TrimSpace(env.Provider.UserMessage)}
 	if raw := strings.TrimSpace(env.Provider.BilledTill); raw != "" {
-		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil && secs > 0 {
+		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil && secs >= minBilledTill {
 			expiry := time.Unix(secs, 0).UTC()
 			info.SubscriptionExpiresAt = &expiry
 		}

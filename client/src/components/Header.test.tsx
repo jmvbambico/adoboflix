@@ -54,16 +54,16 @@ describe("Header account control", () => {
     installBackend();
     const { container } = renderHeader();
 
-    // Negative: the invented identity is gone from the rendered output.
+    // Positive first: the header has rendered a real, labelled account control.
+    const button = screen.getByRole("button", { name: "Account menu" });
+    expect(button).toBeInTheDocument();
+    expect(button).toHaveAttribute("aria-haspopup", "menu");
+
+    // Negative: with that render confirmed, the invented identity is gone from it.
     expect(screen.queryByText("Aether Voyager")).not.toBeInTheDocument();
     expect(screen.queryByText("Diamond Elite Premium")).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain("Aether Voyager");
     expect(container.innerHTML).not.toContain("Diamond Elite Premium");
-
-    // Positive: a real, labelled account control is what sits there now.
-    const button = screen.getByRole("button", { name: "Account menu" });
-    expect(button).toBeInTheDocument();
-    expect(button).toHaveAttribute("aria-haspopup", "menu");
 
     // And it surfaces real state, not a fabricated tier: the active source.
     fireEvent.click(button);
