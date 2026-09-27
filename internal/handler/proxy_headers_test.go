@@ -82,12 +82,8 @@ func TestProxyForwardsIncomingUserAgentWhenStreamHasNone(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
 	}
 
-	ua := got.Get("User-Agent")
-	if ua != browserUA {
-		t.Errorf("origin User-Agent = %q, want the caller's %q", ua, browserUA)
-	}
-	if ua == fabricatedUA {
-		t.Errorf("origin received the fabricated default UA %q", fabricatedUA)
+	if ua := got.Get("User-Agent"); ua != browserUA {
+		t.Errorf("origin User-Agent = %q, want the caller's %q (never the fabricated default %q)", ua, browserUA, fabricatedUA)
 	}
 }
 
@@ -128,6 +124,28 @@ func TestProxyForwardsExplicitUserAgentParamUnchanged(t *testing.T) {
 	}
 }
 
+// TestProxyForwardsExplicitRefererParamUnchanged is the Referer sibling of the
+// UA test above. Without it, a change that dropped `ref` entirely would still
+// pass every other test in this file: the per-source switch keys off `source`,
+// and ResolveChannelStream only inspects the URL it built.
+func TestProxyForwardsExplicitRefererParamUnchanged(t *testing.T) {
+	origin, got := recordingOrigin(t)
+	r := newProxyRouter()
+
+	const configuredRef = "https://provider.example/watch"
+	w := proxyRequest(t, r, url.Values{
+		"url": {origin.URL + "/live/stream.mpd"},
+		"ref": {configuredRef},
+	}, "incoming/1.0")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	if ref := got.Get("Referer"); ref != configuredRef {
+		t.Errorf("origin Referer = %q, want the configured %q", ref, configuredRef)
+	}
+}
+
 // TestProxyDoesNotFabricateReferer: with no `ref` and no per-source override,
 // the origin receives no Referer at all.
 func TestProxyDoesNotFabricateReferer(t *testing.T) {
@@ -140,10 +158,7 @@ func TestProxyDoesNotFabricateReferer(t *testing.T) {
 	}
 
 	if ref := got.Get("Referer"); ref != "" {
-		t.Errorf("origin Referer = %q, want none", ref)
-	}
-	if ref := got.Get("Referer"); ref == fabricatedReferer {
-		t.Errorf("origin received the fabricated default Referer %q", fabricatedReferer)
+		t.Errorf("origin Referer = %q, want none (never the fabricated default %q)", ref, fabricatedReferer)
 	}
 }
 
