@@ -302,6 +302,11 @@ export interface SourceStatus {
   playlist_code_configured: boolean;
   playlist_file_configured: boolean;
   modes: SourceMode[];
+  // playlist_imported_at is RFC3339 and present only when this server imported
+  // the stored playlist itself. An ADOBOFLIX_FILE_PATH playlist and the
+  // sourceless state omit it, so an absent field must render as nothing — never
+  // as a zero or epoch date.
+  playlist_imported_at?: string;
   subscription_expires_at?: string; // RFC3339, e.g. "2030-01-01T00:00:00Z"
   user_message?: string;
 }
@@ -392,6 +397,14 @@ export async function fetchChannels(params: {
     channels = channels.filter(c => c.name.toLowerCase().includes(q));
   }
   return channels;
+}
+
+// fetchChannelCount returns how many channels the active source holds. It reads
+// the same /channels endpoint the library uses and takes its `total`, asking
+// for a single row because only the count is wanted.
+export async function fetchChannelCount(): Promise<number> {
+  const data = await getJSON<ChannelsResponse>(`${API_BASE}/channels?limit=1`);
+  return data.total;
 }
 
 export async function fetchChannelCategories(): Promise<string[]> {

@@ -332,6 +332,7 @@ GET    /api/v1/source/status
        "needs_playlist_code": bool,
        "playlist_code_configured": bool,
        "playlist_file_configured": bool,
+       "playlist_imported_at": "RFC3339",   # only when imported here; omitted otherwise
        "modes": [ { "name", "selectable", "dev",
                     "active", "configured", "needs_playlist_code" } ] }
        # never the code, and the account facts when the adapter can supply them

@@ -32,6 +32,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // EnvPlaylistFile names the environment variable that overrides where the
@@ -115,6 +116,24 @@ func (s *Store) Path() string {
 
 // Exists reports whether a playlist is stored.
 func (s *Store) Exists() bool { return s.Path() != "" }
+
+// ModTime returns the stored playlist's modification time — for this store,
+// when the user imported it. ok is false when nothing is stored here or the
+// file cannot be stat-ed; callers report that by omitting a timestamp field
+// rather than sending a zero time. It deliberately looks only at this store's
+// own path, so an ADOBOFLIX_FILE_PATH playlist that was never imported reports
+// no import time.
+func (s *Store) ModTime() (time.Time, bool) {
+	path := s.Path()
+	if path == "" {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
 
 // FormatOf reports the format a stored path was written as, based on its
 // extension. It is meaningful for a path this store returned.

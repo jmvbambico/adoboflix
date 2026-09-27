@@ -13,10 +13,11 @@ import {
 } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { FileUp, KeyRound, LogOut, RefreshCw, Trash2, User } from "lucide-react";
-import { fetchStats, type AppStats } from "../api/client";
+import { fetchChannelCount, fetchStats, type AppStats } from "../api/client";
 import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
 import { usePlaylistCodeController } from "./playlistCode";
 import { usePlaylistFileController } from "./playlistFile";
+import { describePlaylistContents, formatImportedAt } from "./playlistFacts";
 import { activeSourceLabel, isPinned, selectableModes } from "./sourceModes";
 import PlaylistCodeModal from "./PlaylistCodeModal";
 import PlaylistImportModal from "./PlaylistImportModal";
@@ -82,17 +83,25 @@ export default function AccountMenu() {
 
   const disconnectError = clear.isError ? describeSourceError(clear.error) : null;
 
-  // The playlist's size, from the server's own count — the fact that confirms
-  // the right playlist loaded and shows when it did not. It is read only for
-  // the import shape, and a failed read renders nothing rather than inventing a
-  // number.
+  // What the imported playlist actually holds. Titles come from /stats and live
+  // channels from /channels; a playlist can be either, so both counts are read
+  // and rendered by what is present, never as "0 titles" for a channels-only
+  // import. Both are read only for the import shape, and a failed read renders
+  // nothing rather than inventing a number.
   const statsQuery = useQuery<AppStats>({
     queryKey: ["stats"],
     queryFn: fetchStats,
     enabled: isImport,
     staleTime: 60 * 1000,
   });
-  const stats = statsQuery.data;
+  const channelsQuery = useQuery<number>({
+    queryKey: ["channel-count"],
+    queryFn: fetchChannelCount,
+    enabled: isImport,
+    staleTime: 60 * 1000,
+  });
+  const contents = describePlaylistContents(statsQuery.data?.total_titles, channelsQuery.data);
+  const importedAt = formatImportedAt(status?.playlist_imported_at);
 
   const closeMenu = useCallback((refocus: boolean) => {
     setOpen(false);
@@ -261,11 +270,8 @@ export default function AccountMenu() {
                   An AdoboTV account is optional — import a playlist you already have and play it
                   here.
                 </span>
-                {stats && (
-                  <span className="text-[11px] text-slate-300">
-                    {stats.total_titles} {stats.total_titles === 1 ? "title" : "titles"} loaded
-                  </span>
-                )}
+                {contents && <span className="text-[11px] text-slate-300">{contents}</span>}
+                {importedAt && <span className="text-[11px] text-slate-400">{importedAt}</span>}
               </>
             ) : null}
           </div>

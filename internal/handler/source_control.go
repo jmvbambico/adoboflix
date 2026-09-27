@@ -137,6 +137,10 @@ func NewSourceHandler(opts SourceHandlerOptions) *SourceHandler {
 //     describing the active source.
 //   - playlist_file_configured — whether an imported playlist (or
 //     ADOBOFLIX_FILE_PATH) is available for the file mode.
+//   - playlist_imported_at — RFC3339, the stored imported playlist's mtime.
+//     Present only when this server imported the playlist itself; omitted for
+//     an ADOBOFLIX_FILE_PATH playlist and when nothing is imported, so an
+//     absent field never renders as a zero time.
 //   - modes — one entry per registered adapter, each with name, selectable,
 //     dev, active, configured and needs_playlist_code. The client renders the
 //     user's choices from this and never hardcodes adapter names.
@@ -468,7 +472,7 @@ func (h *SourceHandler) DeletePlaylistFile(c *gin.Context) {
 func (h *SourceHandler) statusBody() gin.H {
 	needs, configured := h.state()
 	active := h.activeName()
-	return gin.H{
+	body := gin.H{
 		"source":                   active,
 		"active":                   active != "",
 		"origin":                   h.origin(),
@@ -478,6 +482,14 @@ func (h *SourceHandler) statusBody() gin.H {
 		"playlist_file_configured": h.fileConfigured(),
 		"modes":                    h.modesStatus(active),
 	}
+	// Only a playlist the user imported here has an import time; a playlist
+	// supplied through ADOBOFLIX_FILE_PATH, and the sourceless state, have none.
+	// The field is omitted rather than sent as a zero time, so the client has
+	// nothing to mistake for 1 Jan 1970.
+	if importedAt, ok := h.files.ModTime(); ok {
+		body["playlist_imported_at"] = importedAt.UTC().Format(time.RFC3339)
+	}
+	return body
 }
 
 // sourceModeStatus is one entry in status's modes list. The client renders the

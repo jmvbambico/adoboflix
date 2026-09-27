@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/source"
@@ -94,6 +95,48 @@ func TestSourceStatusDevAdapterFlaggedNotSelectable(t *testing.T) {
 	entry := modeEntry(t, body, devName)
 	if entry["dev"] != true || entry["selectable"] != false {
 		t.Errorf("dev mode entry = %v, want dev=true selectable=false", entry)
+	}
+}
+
+// An imported playlist reports when it was imported, from the stored file's own
+// mtime. The field is pair-tested against its absence: with nothing imported it
+// must be omitted entirely, never sent as a zero time.
+func TestSourceStatusReportsPlaylistImportedAtOnlyForAnImport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, _, _ := newTestSourceHandler(t, source.Config{Name: file.Name}, "")
+
+	body := statusBody(t, h)
+	if _, present := body["playlist_imported_at"]; present {
+		t.Errorf("playlist_imported_at = %v, want it absent with nothing imported", body["playlist_imported_at"])
+	}
+
+	if _, _, err := h.files.Save([]byte(`{"entries":[]}`)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	body = statusBody(t, h)
+	raw, ok := body["playlist_imported_at"].(string)
+	if !ok || raw == "" {
+		t.Fatalf("playlist_imported_at = %v, want an RFC3339 string after an import", body["playlist_imported_at"])
+	}
+	if _, err := time.Parse(time.RFC3339, raw); err != nil {
+		t.Errorf("playlist_imported_at = %q, want RFC3339: %v", raw, err)
+	}
+}
+
+// A playlist supplied through ADOBOFLIX_FILE_PATH was not imported here, so it
+// carries no import time — the field is omitted, not the env file's mtime.
+func TestSourceStatusEnvFilePathHasNoPlaylistImportedAt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, _, _ := newTestSourceHandler(t, source.Config{Name: file.Name}, "")
+	h.envFile = "/somewhere/else/playlist.json"
+
+	body := statusBody(t, h)
+	if !h.fileConfigured() {
+		t.Fatal("fileConfigured = false, want true from ADOBOFLIX_FILE_PATH")
+	}
+	if _, present := body["playlist_imported_at"]; present {
+		t.Errorf("playlist_imported_at = %v, want it absent for an env-supplied path", body["playlist_imported_at"])
 	}
 }
 

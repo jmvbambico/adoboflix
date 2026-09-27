@@ -32,6 +32,7 @@ interface StatusShape {
   playlist_code_configured: boolean;
   playlist_file_configured: boolean;
   modes: SourceMode[];
+  playlist_imported_at?: string;
   subscription_expires_at?: string;
   user_message?: string;
 }
@@ -87,12 +88,15 @@ interface BackendOptions extends Partial<StatusShape> {
   // The reply DELETE /source/playlist-file gives. >= 300 simulates a failed
   // removal.
   removeStatus?: number;
-  // What /api/v1/stats reports — the import shape's playlist count.
+  // What /api/v1/stats reports — the import shape's title counts.
   stats?: { total_titles: number; total_providers: number; total_genres: number };
+  // What /api/v1/channels reports as total — the import shape's channel count.
+  channelTotal?: number;
 }
 
 const FILE_URL = "/api/v1/source/playlist-file";
 const STATS_URL = "/api/v1/stats";
+const CHANNELS_URL = "/api/v1/channels";
 
 // installBackend serves the status endpoint, the stats read the import shape
 // makes, and the two DELETEs that disconnect or remove. It records every call
@@ -103,6 +107,7 @@ function installBackend(init: BackendOptions = {}) {
     deleteStatus = 200,
     removeStatus = 200,
     stats = { total_titles: 7, total_providers: 2, total_genres: 3 },
+    channelTotal = 0,
     ...statusInit
   } = init;
   const status: StatusShape = { ...defaultStatus("adobotv-http", false), ...statusInit };
@@ -117,6 +122,9 @@ function installBackend(init: BackendOptions = {}) {
 
       if (url.endsWith(STATUS_URL)) return makeResponse(200, status);
       if (url.endsWith(STATS_URL)) return makeResponse(200, stats);
+      if (url.includes(CHANNELS_URL)) {
+        return makeResponse(200, { channels: [], total: channelTotal, page: 1, has_more: false });
+      }
       if (url.endsWith(CODE_URL) && method === "DELETE") {
         if (deleteStatus >= 300) {
           return makeResponse(deleteStatus, { error: "could not clear", code: "internal_error" });
@@ -320,6 +328,101 @@ describe("AccountMenu", () => {
     expect(screen.queryByText(/playing your local playlist/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/titles loaded/i)).not.toBeInTheDocument();
     expect(backend.calls.some((c) => c.url.endsWith("/api/v1/stats"))).toBe(false);
+    expect(backend.calls.some((c) => c.url.includes("/api/v1/channels"))).toBe(false);
+  });
+
+  // A channels-only playlist is a good import. It must be described by what it
+  // holds, never as "0 titles", which reads as a failed import and invites a
+  // pointless re-import.
+  it("describes a channels-only playlist without saying zero titles", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      stats: { total_titles: 0, total_providers: 0, total_genres: 0 },
+      channelTotal: 3,
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    // Positive: the content that is actually there.
+    expect(await screen.findByText("3 channels loaded")).toBeInTheDocument();
+    // Negative: no zero-titles claim.
+    expect(screen.queryByText(/titles loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 titles/)).not.toBeInTheDocument();
+  });
+
+  it("describes a titles-only playlist without saying zero channels", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      stats: { total_titles: 5, total_providers: 1, total_genres: 1 },
+      channelTotal: 0,
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    expect(await screen.findByText("5 titles loaded")).toBeInTheDocument();
+    expect(screen.queryByText(/channels loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/0 channels/)).not.toBeInTheDocument();
+  });
+
+  it("describes a playlist that holds both channels and titles", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      stats: { total_titles: 5, total_providers: 1, total_genres: 1 },
+      channelTotal: 3,
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    expect(await screen.findByText("3 channels and 5 titles loaded")).toBeInTheDocument();
+  });
+
+  // The one genuinely empty state gets its own wording, distinct from a
+  // live-TV playlist that also has zero titles.
+  it("says a genuinely empty playlist is empty, distinctly from a channels-only one", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      stats: { total_titles: 0, total_providers: 0, total_genres: 0 },
+      channelTotal: 0,
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    expect(await screen.findByText(/has no channels or titles/i)).toBeInTheDocument();
+    expect(screen.queryByText(/channels loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/titles loaded/)).not.toBeInTheDocument();
+  });
+
+  it("shows when the playlist was imported, in readable form", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      playlist_imported_at: "2026-03-12T09:30:00Z",
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    const line = await screen.findByText(/^Imported /);
+    expect(line.textContent).toMatch(/2026/);
+    // Negative: the raw timestamp is not shown.
+    expect(line.textContent).not.toContain("2026-03-12T09:30:00Z");
+  });
+
+  // Paired with the case above: with no timestamp (a file supplied through
+  // ADOBOFLIX_FILE_PATH is not an import), no import line renders at all.
+  it("shows no import time when the playlist was not imported here", async () => {
+    const { queryClient } = renderMenu(importStatus());
+    await openMenu(queryClient, "Local playlist");
+
+    // Positive: the import section is present.
+    expect(screen.getByText(/playing your local playlist/i)).toBeInTheDocument();
+    // Negative: no import time.
+    expect(screen.queryByText(/^Imported /)).not.toBeInTheDocument();
+  });
+
+  it("renders no import time for a zero timestamp, never an epoch date", async () => {
+    const { queryClient } = renderMenu({
+      ...importStatus(),
+      playlist_imported_at: "0001-01-01T00:00:00Z",
+    });
+    await openMenu(queryClient, "Local playlist");
+
+    expect(screen.getByText(/playing your local playlist/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Imported /)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1970|0001/)).not.toBeInTheDocument();
   });
 
   // A development harness is labelled plainly as one and never by its adapter
