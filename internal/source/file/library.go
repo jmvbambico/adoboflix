@@ -28,9 +28,10 @@ type libraryFile struct {
 // library is the parsed, indexed playlist the query methods read. It is
 // immutable once built and shared across goroutines without a lock.
 //
-// This is the seam that leaves room for a second parser: parseLibrary turns
-// JSON bytes into a library, a future M3U parser would turn M3U bytes into the
-// same value, and none of the query code below would change.
+// This was the seam left open for a second parser, and M3U now uses it:
+// parseLibrary turns JSON bytes into a library and parseM3U turns M3U bytes
+// into the same value, both through buildLibrary, so no query code below knows
+// which format produced the library it reads.
 type library struct {
 	entries  []source.Entry
 	channels []source.Channel
@@ -44,7 +45,22 @@ type library struct {
 	episodesByVod    map[string][]source.Episode
 }
 
-// parseLibrary decodes the documented JSON envelope into an indexed library.
+// parseLibrary decodes the documented JSON envelope and indexes it. It is the
+// JSON front end for buildLibrary, which does the actual indexing and which the
+// M3U parser shares (see parseM3U).
+func parseLibrary(data []byte) (*library, error) {
+	var file libraryFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		return nil, err
+	}
+	return buildLibrary(file), nil
+}
+
+// buildLibrary indexes a decoded envelope into the immutable, query-ready
+// library. It is the shared tail of every parser: parseLibrary decodes JSON into
+// a libraryFile and hands it here; parseM3U synthesises the same libraryFile
+// from a playlist and hands it here too. Funnelling both through one indexer is
+// what makes an id-less JSON row and an id-less M3U row behave identically.
 //
 // Ids are assigned in two passes. The first reserves every id the file spells
 // out; the second derives ids only for the rows that have none, drawing from
@@ -65,12 +81,7 @@ type library struct {
 // their rows are always kept, because two rows under one channel are separate
 // streams and no interface method looks a stream up by id. Their derived ids
 // still avoid every id the file provides.
-func parseLibrary(data []byte) (*library, error) {
-	var file libraryFile
-	if err := json.Unmarshal(data, &file); err != nil {
-		return nil, err
-	}
-
+func buildLibrary(file libraryFile) *library {
 	lib := &library{
 		entriesByID:      make(map[string]source.Entry, len(file.Entries)),
 		channelsByID:     make(map[string]source.Channel, len(file.Channels)),
@@ -172,7 +183,7 @@ func parseLibrary(data []byte) (*library, error) {
 		sortEpisodes(lib.episodesByVod[id])
 	}
 
-	return lib, nil
+	return lib
 }
 
 // --- normalisation ----------------------------------------------------------
