@@ -41,6 +41,9 @@ func TestRegistryEntry(t *testing.T) {
 	if !found {
 		t.Errorf("source.Available() = %v, want it to contain %q", source.Available(), Name)
 	}
+	if source.NeedsDatabase(Name) {
+		t.Errorf("NeedsDatabase(%q) = true, want false: this adapter needs no database", Name)
+	}
 }
 
 func TestNewFromEnvFailsFast(t *testing.T) {

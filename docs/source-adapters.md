@@ -11,11 +11,18 @@ live `settings` table — the surprises are marked.
 
 ## The three adapters
 
-| Adapter | For | Status |
-|---|---|---|
-| `adobotv-http` | A subscriber with an AdoboTV account | The real path |
-| `file` | Someone with no account and their own playlist | Supported |
-| `postgres-direct` | Verifying the player itself | **Development harness only** |
+| Adapter | For | Database | Status |
+|---|---|---|---|
+| `adobotv-http` | A subscriber with an AdoboTV account | none | The real path |
+| `file` | Someone with no account and their own playlist | none | Supported |
+| `postgres-direct` | Verifying the player itself | **required** | **Development harness only** |
+
+Only `postgres-direct` needs `ADOBOFLIX_PG_URL`. Each adapter declares its need
+at registration (`source.Register`) and the server opens a database connection
+only when the selected one asks for it: `adobotv-http` and `file` read no SQL
+handle at all and never dial one. That is the main practical reason to choose
+`file` — the person it exists for has no AdoboTV account, and usually no AdoboTV
+database either.
 
 `postgres-direct` exists today and is what proved DASH+Clearkey playback works
 end to end. It bypasses entitlement, device authorisation, and every analytics
@@ -296,9 +303,10 @@ the subscriber path uses — the player never learns where the content came
 from.
 
 The adapter reads the file **once, at startup**, into an in-memory library, and
-every query answers from that value. It never writes the file, never touches
-the database (`source.Config.DB` is ignored), and imports no SQL package, so
-the read-only invariants hold structurally rather than by discipline. A path
+every query answers from that value. It never writes the file, imports no SQL
+package, and never touches the database — the server opens no connection for it
+at all, and `source.Config.DB` arrives nil. The read-only invariants hold
+structurally rather than by discipline. A path
 that cannot be read, or bytes that are not the documented JSON, is a **startup
 error** naming the path: AdoboFlix refuses to boot with a silently empty
 library, because an empty player is indistinguishable from a broken one.
@@ -453,7 +461,9 @@ M3U parser can be added later without touching any query code.
 
 ## Why not the database
 
-`postgres-direct` is a test harness, and the reason is not hygiene.
+`postgres-direct` is a test harness, and the reason is not hygiene. It is also
+the only adapter that opens a database connection at all — the other two
+declare no database need, so the server never dials one for them.
 
 AdoboTV records a playback event at **both** `/v1/drm/key/` (channel or VOD
 access, per content id and user) and `/v1/play/*`. Its README calls

@@ -14,12 +14,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
 	"github.com/jmvbambico/adoboflix/internal/middleware"
 	"github.com/jmvbambico/adoboflix/internal/source"
+	"github.com/joho/godotenv"
 
 	// Adapters register themselves with internal/source from their init.
 	_ "github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
@@ -65,15 +65,23 @@ func main() {
 		log.Fatalf("Source configuration: %v", err)
 	}
 
-	// Initialize database connection
-	database, err := db.Connect()
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+	// Open a database connection only when the selected adapter declared it
+	// needs one. adobotv-http and file read no SQL handle at all, so a user
+	// with no AdoboTV database can run them; only postgres-direct reads the
+	// schema directly. The requirement comes from the adapter's own
+	// source.Register declaration, not from a name check here.
+	cfg := source.Config{Name: sourceName}
+	if source.NeedsDatabase(sourceName) {
+		database, err := db.Connect()
+		if err != nil {
+			log.Fatalf("Source %q requires a database, but connecting failed: %v", sourceName, err)
+		}
+		defer database.Close()
+		cfg.DB = database.DB
 	}
-	defer database.Close()
 
 	// Open the selected source adapter. Handlers only ever see this interface.
-	playerSource, err := source.Open(source.Config{Name: sourceName, DB: database.DB})
+	playerSource, err := source.Open(cfg)
 	if err != nil {
 		log.Fatalf("Failed to open source %q: %v", sourceName, err)
 	}

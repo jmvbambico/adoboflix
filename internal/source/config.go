@@ -14,8 +14,9 @@ import (
 const EnvSource = "ADOBOFLIX_SOURCE"
 
 // Config is what an adapter is opened with. Name is the requested adapter;
-// DB is a read-only SQL handle that a database-backed adapter may use and
-// others simply ignore.
+// DB is a read-only SQL handle, present only for an adapter that declared
+// Requirement{Database: true} — every other adapter is opened with a nil
+// handle it must ignore.
 type Config struct {
 	Name string
 	DB   *sqlx.DB
@@ -24,14 +25,30 @@ type Config struct {
 // Factory opens an adapter from a Config.
 type Factory func(Config) (Source, error)
 
+// Requirement is what an adapter declares it needs in order to open. It is
+// declared once, at registration, so the process can decide whether to open a
+// database before calling Open instead of hardcoding adapter names at the
+// call site.
+type Requirement struct {
+	// Database is true when the adapter reads a SQL handle.
+	Database bool
+}
+
+// registration is a factory plus what it declared it needs.
+type registration struct {
+	requirement Requirement
+	factory     Factory
+}
+
 // factories is populated by adapter packages in their init, the same way
 // database/sql registers drivers. It is only written during init, before any
 // Open call.
-var factories = map[string]Factory{}
+var factories = map[string]registration{}
 
-// Register makes an adapter selectable under name. Adapters call it from init.
-func Register(name string, f Factory) {
-	factories[name] = f
+// Register makes an adapter selectable under name, with its declared needs.
+// Adapters call it from init.
+func Register(name string, req Requirement, f Factory) {
+	factories[name] = registration{requirement: req, factory: f}
 }
 
 // Available lists the registered adapter names, sorted.
@@ -58,10 +75,25 @@ func Validate(name string) error {
 	return nil
 }
 
-// Open validates cfg and opens the selected adapter.
+// NeedsDatabase reports whether the adapter registered under name requires a
+// SQL handle. It is meaningful for a name Validate accepts; an unknown name
+// reports false.
+func NeedsDatabase(name string) bool {
+	reg, ok := factories[name]
+	return ok && reg.requirement.Database
+}
+
+// Open validates cfg and opens the selected adapter. An adapter that declared
+// a database requirement is never handed a nil handle: a missing handle is an
+// error naming the adapter and why it needs one, raised before the factory is
+// called.
 func Open(cfg Config) (Source, error) {
 	if err := Validate(cfg.Name); err != nil {
 		return nil, err
 	}
-	return factories[cfg.Name](cfg)
+	reg := factories[cfg.Name]
+	if reg.requirement.Database && cfg.DB == nil {
+		return nil, fmt.Errorf("source %q requires a database, but no SQL handle was provided: set ADOBOFLIX_PG_URL or MPDUMPY_PG_URL", cfg.Name)
+	}
+	return reg.factory(cfg)
 }
