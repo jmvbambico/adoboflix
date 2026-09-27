@@ -255,3 +255,43 @@ func TestSourceStatusDoesNotStallOnAColdUpstream(t *testing.T) {
 		t.Errorf("status made %d upstream request(s); the account read must not fetch", got)
 	}
 }
+
+// The shape the live AdoboTV returns for an account whose expiry must be hidden:
+// billed_till "0" beside a real user_message. Status must omit
+// subscription_expires_at entirely — never "1970-01-01T00:00:00Z" — and keep the
+// message.
+func TestSourceStatusOmitsZeroBilledTill(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"provider":{"user_message":"Welcome to AdoboTV cryogenix!","billed_till":"0"},"categories":{},"channels":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	t.Setenv(adobotvhttp.EnvBaseURL, srv.URL)
+	src, err := source.Open(source.Config{Name: adobotvhttp.Name, PlaylistCode: "SOME-CODE"})
+	if err != nil {
+		t.Fatalf("source.Open: %v", err)
+	}
+	// Warm the envelope cache the way a normal app load does; AccountInfo is
+	// cache-only.
+	if _, _, err := src.ListChannels("", 1, 0); err != nil {
+		t.Fatalf("warm the envelope: %v", err)
+	}
+
+	h, player, store := newTestSourceHandler(t, source.Config{Name: adobotvhttp.Name}, "")
+	if err := store.Save("SOME-CODE"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// Hide the EPG capability so the swap starts no EPG service.
+	player.SwapSource(accountOnlySource{Source: src})
+
+	body := statusBody(t, h)
+	if got, ok := body["subscription_expires_at"]; ok {
+		t.Errorf("status carries subscription_expires_at = %v for billed_till \"0\", want it omitted", got)
+	}
+	if got := body["user_message"]; got != "Welcome to AdoboTV cryogenix!" {
+		t.Errorf("user_message = %v, want the real message preserved", got)
+	}
+}

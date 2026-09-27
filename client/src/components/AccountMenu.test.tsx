@@ -169,6 +169,23 @@ describe("AccountMenu", () => {
     expect(screen.getByText("Renew by Friday.")).toBeInTheDocument();
   });
 
+  // Paired with the case above: when the server reports no expiry (the live
+  // account whose billed_till is the "0" sentinel), the menu says nothing about
+  // a subscription — it must not invent a date, least of all 1 Jan 1970.
+  it("renders no subscription line when the server reports no expiry", async () => {
+    installBackend({
+      playlist_code_configured: true,
+      user_message: "Welcome to AdoboTV cryogenix!",
+    });
+    renderMenu();
+    await openMenu();
+
+    expect(screen.queryByText(/subscription renews/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/1970/)).not.toBeInTheDocument();
+    // The real message beside it still renders.
+    expect(screen.getByText("Welcome to AdoboTV cryogenix!")).toBeInTheDocument();
+  });
+
   it("says plainly when the source needs no playlist code", async () => {
     installBackend({ needs_playlist_code: false, playlist_code_configured: false });
     renderMenu();

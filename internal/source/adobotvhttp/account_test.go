@@ -106,6 +106,50 @@ func TestAccountInfoIgnoresUnparseableExpiry(t *testing.T) {
 	}
 }
 
+// billed_till "0" is upstream's sentinel for "no expiry to show for this
+// account" — the live AdoboTV returns exactly this alongside a real
+// user_message. It must be treated as absent, never rendered as 1 Jan 1970, and
+// must not suppress the message. A negative value is the same kind of sentinel.
+func TestAccountInfoTreatsNonPositiveBilledTillAsAbsent(t *testing.T) {
+	for _, billedTill := range []string{"0", "-1"} {
+		t.Run(billedTill, func(t *testing.T) {
+			adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+				writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, billedTill))
+			})
+			warmEnvelope(t, adapter)
+
+			info, err := adapter.AccountInfo(context.Background())
+			if err != nil {
+				t.Fatalf("AccountInfo: %v", err)
+			}
+			if info.SubscriptionExpiresAt != nil {
+				t.Errorf("SubscriptionExpiresAt = %v, want nil for billed_till %q", info.SubscriptionExpiresAt, billedTill)
+			}
+			if info.UserMessage != "Welcome to AdoboTV tester!" {
+				t.Errorf("UserMessage = %q, want the message preserved beside a sentinel expiry", info.UserMessage)
+			}
+		})
+	}
+}
+
+// A genuinely past expiry is real information, not a sentinel: a lapsed
+// subscription must still be reported rather than silently hidden.
+func TestAccountInfoKeepsAPastExpiry(t *testing.T) {
+	adapter, _ := newTestServer(t, time.Minute, func(w http.ResponseWriter, r *http.Request) {
+		writeBody(w, http.StatusOK, "application/json", accountEnvelope(t, r, "1700000000"))
+	})
+	warmEnvelope(t, adapter)
+
+	info, err := adapter.AccountInfo(context.Background())
+	if err != nil {
+		t.Fatalf("AccountInfo: %v", err)
+	}
+	want := time.Unix(1700000000, 0).UTC()
+	if info.SubscriptionExpiresAt == nil || !info.SubscriptionExpiresAt.Equal(want) {
+		t.Errorf("SubscriptionExpiresAt = %v, want the past expiry %v kept", info.SubscriptionExpiresAt, want)
+	}
+}
+
 // The whole point of the cache-only contract: on a cold cache AccountInfo
 // reports "not available yet" and does NOT reach upstream. This is what keeps
 // /api/v1/source/status from stalling on a slow or unreachable AdoboTV.

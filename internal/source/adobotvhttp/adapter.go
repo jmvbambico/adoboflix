@@ -568,11 +568,21 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 // Making status wait on upstream here would let an unreachable AdoboTV stall
 // the account UI for the client's whole 30s timeout.
 //
-// billed_till is a string of unix seconds upstream and is absent for
-// non-subscription tiers, so a missing value is the normal case, not an error.
-// A value that is present but not a unix-seconds integer is treated as absent
-// rather than failing the whole call, so a malformed expiry cannot hide a
-// perfectly good user_message.
+// billed_till is a string of unix seconds upstream. It is absent for
+// non-subscription tiers, and upstream currently sends "0" — rather than
+// omitting the field — for accounts whose expiry must not be shown (AdoboTV's
+// own hiding task is outstanding). A non-positive value is that sentinel, not a
+// date: time.Unix(0, 0) is 1 Jan 1970, and rendering it would assert an expiry
+// we do not know. So a non-positive value is treated exactly like an absent
+// one, and a value that is present but not a unix-seconds integer likewise,
+// rather than failing the whole call — either way it cannot hide a perfectly
+// good user_message.
+//
+// There is deliberately no upper bound: a legitimate far-future expiry (a
+// lifetime or reseller slot) is real information and must not be rejected. And
+// a genuinely past expiry keeps its real value — a lapsed subscription is
+// something the user should see, which is different from "upstream told us
+// nothing".
 func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return source.AccountInfo{}, err
@@ -583,7 +593,7 @@ func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
 	}
 	info := source.AccountInfo{UserMessage: strings.TrimSpace(env.Provider.UserMessage)}
 	if raw := strings.TrimSpace(env.Provider.BilledTill); raw != "" {
-		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil {
+		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil && secs > 0 {
 			expiry := time.Unix(secs, 0).UTC()
 			info.SubscriptionExpiresAt = &expiry
 		}
