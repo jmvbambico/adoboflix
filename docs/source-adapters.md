@@ -310,6 +310,51 @@ today.
 
 ---
 
+## Stream URL exposure — what the browser can see
+
+AdoboFlix is a **proxying client-side player**, and that shape has a
+consequence worth stating plainly rather than rediscovering.
+
+`/api/v1/resolve` hands the page a URL of the form
+`…/api/v1/proxy?url=<upstream CDN URL>`, and `CustomPlayer.tsx` registers a
+Shaka `registerRequestFilter` that rewrites **every** request — manifests and
+segments alike — through that same parameter. So anyone with devtools open on
+the page can read the real upstream CDN host. AdoboTV deliberately hides that
+host (AES-encrypted inside `runtime_attr_url`, with the `channels[].url` decoy
+on top — see "`channels[].url` is a decoy"), so the client does weaken a
+property the platform enforces.
+
+**What is fixed.** Credentials no longer travel with it. Some streams carry
+HTTP Basic `user:pass`, which the adapter re-embeds in the stream URL's
+userinfo (`injectUserInfo` in `internal/source/adobotvhttp/drm.go`). Resolve
+now strips that userinfo before wrapping the URL and keeps it server-side
+(`internal/handler/credentials.go`), keyed by origin; the proxy re-attaches it
+as an `Authorization` header on the way out. The page never receives the
+credentials, and because the key is the origin rather than the exact URL,
+player-derived **segment** requests are authenticated too — which the old
+userinfo-in-the-manifest-URL scheme never managed.
+
+**What is fixed.** The server binds to `127.0.0.1` by default, so the
+unauthenticated proxy and the resolve response are not offered to the LAN
+unless someone sets `SERVER_HOST=0.0.0.0` on purpose.
+
+**What remains.** The CDN host itself is still visible in `?url=`. This is
+inherent to the design, not an oversight. Hiding it would take an opaque
+handle **plus** a manifest-rewriting proxy — parse DASH and HLS, rewrite every
+segment URI, variant playlist, `EXT-X-MAP` init segment and byte range, hold a
+TTL map, handle live windows. An opaque handle for the manifest alone hides
+nothing, because the player derives segment URLs from the manifest body and
+the next segment request re-exposes the host.
+
+That subsystem is not worth building for the threat that is actually present:
+the only viewer is the subscriber, who already holds the playlist code, and
+AdoboTV's decoy defends against a *leaked playlist* reaching a third party —
+which does not transfer to a page only the subscriber loads. **Revisit it if
+AdoboFlix becomes multi-user or internet-exposed**, at which point the proxy
+needs authentication regardless.
+
+---
+
 ## What this means for the interface
 
 One constraint dominates the design: **the adapters do not agree on what a

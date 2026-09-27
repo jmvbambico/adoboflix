@@ -28,7 +28,13 @@ import (
 
 func main() {
 	// Defaults can be overridden by SERVER_HOST / SERVER_PORT env vars or CLI flags.
-	defaultHost := "0.0.0.0"
+	//
+	// The bind address defaults to loopback, NOT 0.0.0.0. /api/v1/proxy is an
+	// unauthenticated fetcher for arbitrary URLs and /api/v1/resolve exposes
+	// the upstream CDN URL in its response, so a default that listens on every
+	// interface hands both to anything on the LAN. Exposing AdoboFlix beyond
+	// this machine is a deliberate act: set SERVER_HOST=0.0.0.0 or -host.
+	defaultHost := "127.0.0.1"
 	defaultPort := 5656
 	if v := os.Getenv("SERVER_HOST"); v != "" {
 		defaultHost = v

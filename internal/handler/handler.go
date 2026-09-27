@@ -21,12 +21,13 @@ import (
 )
 
 type PlayerHandler struct {
-	src source.Source
-	epg *epg.Service
+	src   source.Source
+	epg   *epg.Service
+	creds *credentialStore
 }
 
 func NewPlayerHandler(src source.Source) *PlayerHandler {
-	return &PlayerHandler{src: src}
+	return &PlayerHandler{src: src, creds: newCredentialStore()}
 }
 
 func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
@@ -154,12 +155,16 @@ func derefString(s *string) string {
 	return *s
 }
 
-// buildProxyURL wraps a raw stream URL through /api/v1/proxy exactly the way
-// resolve has always done: QueryEscape the url, append &source=, then optional
-// &ua= / &ref= when the stream carries its own headers.
-func buildProxyURL(scheme, host, rawURL, sourceType, ua, ref string) string {
+// buildProxyURL wraps a raw stream URL through /api/v1/proxy: QueryEscape the
+// url, append &source=, then optional &ua= / &ref= when the stream carries its
+// own headers.
+//
+// Any HTTP Basic credentials the stream URL carries in its userinfo are moved
+// into the server-side credential store first, so the browser is handed a URL
+// without them; the proxy re-attaches them as a header. See credentials.go.
+func (h *PlayerHandler) buildProxyURL(scheme, host, rawURL, sourceType, ua, ref string) string {
 	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
-		scheme, host, url.QueryEscape(rawURL), sourceType)
+		scheme, host, url.QueryEscape(h.creds.stash(rawURL)), sourceType)
 	if ua != "" {
 		proxyURL += "&ua=" + url.QueryEscape(ua)
 	}
@@ -222,14 +227,14 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 		// Referer, so each stream carries its own user_agent/referer.
 		ua := derefString(primary.UserAgent)
 		ref := derefString(primary.Referer)
-		proxyURL := buildProxyURL(scheme, c.Request.Host, primary.URL, primary.SourceType, ua, ref)
+		proxyURL := h.buildProxyURL(scheme, c.Request.Host, primary.URL, primary.SourceType, ua, ref)
 
 		alternates := make([]resolveAlternate, 0, len(vodStreams)-1)
 		for _, s := range vodStreams[1:] {
 			altUA := derefString(s.UserAgent)
 			altRef := derefString(s.Referer)
 			alternates = append(alternates, resolveAlternate{
-				URL:        buildProxyURL(scheme, c.Request.Host, s.URL, s.SourceType, altUA, altRef),
+				URL:        h.buildProxyURL(scheme, c.Request.Host, s.URL, s.SourceType, altUA, altRef),
 				Provider:   s.SourceType,
 				SourceType: s.SourceType,
 				DrmType:    derefString(s.DrmType),
@@ -247,7 +252,7 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 			"url": proxyURL, "provider": primary.SourceType,
 			"drm_type": derefString(primary.DrmType), "drm_k": derefString(primary.DrmK),
 			"license_url": derefString(primary.LicenseURL),
-			"user_agent": ua, "referer": ref,
+			"user_agent":  ua, "referer": ref,
 			"alternates": alternates,
 		})
 		return
@@ -262,13 +267,13 @@ func (h *PlayerHandler) ResolveStream(c *gin.Context) {
 
 	ua := derefString(entry.UserAgent)
 	ref := derefString(entry.Referer)
-	proxyURL := buildProxyURL(scheme, c.Request.Host, *entry.StreamURL, entry.SourceType, ua, ref)
+	proxyURL := h.buildProxyURL(scheme, c.Request.Host, *entry.StreamURL, entry.SourceType, ua, ref)
 
 	c.JSON(http.StatusOK, gin.H{
 		"url": proxyURL, "provider": entry.SourceType,
 		"drm_type": derefString(entry.DrmType), "drm_k": derefString(entry.DrmK),
 		"license_url": derefString(entry.LicenseURL),
-		"user_agent": ua, "referer": ref,
+		"user_agent":  ua, "referer": ref,
 		"alternates": []resolveAlternate{},
 	})
 }
@@ -333,14 +338,7 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 		epRef = *episode.Referer
 	}
 
-	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
-		scheme, c.Request.Host, url.QueryEscape(*episode.StreamURL), episode.SourceType)
-	if epUA != "" {
-		proxyURL += "&ua=" + url.QueryEscape(epUA)
-	}
-	if epRef != "" {
-		proxyURL += "&ref=" + url.QueryEscape(epRef)
-	}
+	proxyURL := h.buildProxyURL(scheme, c.Request.Host, *episode.StreamURL, episode.SourceType, epUA, epRef)
 
 	// Check for per-episode DRM
 	drmType := ""
@@ -406,6 +404,13 @@ func (h *PlayerHandler) ProxyStream(c *gin.Context) {
 		headers["Referer"] = "https://vixcloud.com"
 	}
 
+	// Credentials are attached server-side. They are looked up BEFORE the
+	// userinfo is stripped, because a direct caller's own userinfo is the more
+	// specific source; the outbound request then carries them as an
+	// Authorization header instead of in the URL. See credentials.go.
+	creds, haveCreds := h.creds.lookup(targetURL)
+	targetURL = stripUserInfo(targetURL)
+
 	req, err := http.NewRequestWithContext(c.Request.Context(), c.Request.Method, targetURL, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create request"})
@@ -413,6 +418,9 @@ func (h *PlayerHandler) ProxyStream(c *gin.Context) {
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
+	}
+	if haveCreds {
+		req.SetBasicAuth(creds.user, creds.pass)
 	}
 
 	// Forward Range header for DASH segment seeks
@@ -506,8 +514,7 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	proxyURL := fmt.Sprintf("%s://%s/api/v1/proxy?url=%s&source=%s",
-		scheme, c.Request.Host, url.QueryEscape(stream.URL), stream.SourceType)
+	proxyURL := h.buildProxyURL(scheme, c.Request.Host, stream.URL, stream.SourceType, "", "")
 
 	drmType := ""
 	if stream.DrmType != nil {
