@@ -298,20 +298,45 @@ the client's.
 
 For the second user in `AGENTS.md`: someone with **no AdoboTV account** who
 already has a playlist and just wants AdoboFlix to play it. Point
-`ADOBOFLIX_FILE_PATH` at a JSON file and the repo boots into the same player
-the subscriber path uses — the player never learns where the content came
-from.
+`ADOBOFLIX_FILE_PATH` at a local playlist — JSON or M3U — and the repo boots
+into the same player the subscriber path uses. The player never learns where the
+content came from.
 
 The adapter reads the file **once, at startup**, into an in-memory library, and
 every query answers from that value. It never writes the file, imports no SQL
 package, and never touches the database — the server opens no connection for it
 at all, and `source.Config.DB` arrives nil. The read-only invariants hold
 structurally rather than by discipline. A path
-that cannot be read, or bytes that are not the documented JSON, is a **startup
-error** naming the path: AdoboFlix refuses to boot with a silently empty
-library, because an empty player is indistinguishable from a broken one.
+that cannot be read, or bytes that are not the format its extension selects, is
+a **startup error** naming the path: AdoboFlix refuses to boot with a silently
+empty library, because an empty player is indistinguishable from a broken one.
 
-### The format is the internal models, serialised
+### Format is chosen by extension
+
+The file's extension selects the parser, and nothing else does:
+
+| Extension | Parser |
+|---|---|
+| `.json` | the JSON envelope below |
+| `.m3u`, `.m3u8` | the M3U playlist below |
+
+Extension, not content-sniffing, on purpose. A body can be valid in both
+formats and a file can be misnamed; if the parser were chosen by looking at the
+bytes, a malformed `.m3u` might be quietly retried as JSON and the user would
+get a puzzling error about the wrong format. Choosing by extension means a
+malformed `.m3u` reports as a malformed M3U and a malformed `.json` as a
+malformed JSON. Any other extension (or none) is a startup error naming the
+supported set: `.json, .m3u, .m3u8`.
+
+The AdoboTV `m3u` output-format hazard documented above is a different thing and
+does not bear on this parser: it is about an HTTP response body from
+`/v1/drm/key/` that was requested as JSON, not about a file a user points the
+adapter at. A user's `.m3u` file does carry KODIPROP-style `#` directives, and
+this parser ignores every directive it does not use — but the file's format is
+decided by its extension before any of that, so there is no ambiguity to
+resolve.
+
+### The JSON format is the internal models, serialised
 
 There is no friendlier hand-authored format and no translation layer. The file
 is a **direct serialisation of the Go types in `internal/source/models.go`** —
@@ -456,6 +481,115 @@ parent by an id the file spells out. A derived parent id cannot be referenced,
 so a file that wants its streams or episodes grouped must give the parent an
 id. An un-referenced child row is kept but unreachable through that parent.
 
+### The M3U format
+
+An M3U/M3U8 playlist is an `#EXTM3U` header followed by `#EXTINF` entries, each
+with the URL it plays on the next line:
+
+```
+#EXTM3U
+#EXTINF:-1 tvg-id="news.tvg" tvg-name="News One" tvg-logo="https://img.example/news.png" group-title="News",News One
+https://mycdn.example/live/news/index.m3u8
+#EXTINF:-1 group-title="Series",Breaking Bad S01E02
+https://mycdn.example/shows/bb/s01e02.mkv
+```
+
+What the parser accepts, and what it drops:
+
+- **Accepted**, because real playlists do it: attributes in any order; values in
+  double quotes, single quotes, or bare; unknown attributes (`catchup`,
+  `timeshift`, …) and unknown `#` directives; blank lines and comments; CRLF
+  endings; a UTF-8 BOM; and a missing `#EXTM3U` header.
+- **Dropped, and counted** in the startup summary: an `#EXTINF` whose next line
+  is not a URL (or that runs to end of file), and a bare URL line with no
+  preceding `#EXTINF` — the latter has no title and no group, so there is nothing
+  honest to file it as.
+- **Recognised but ignored**: every `#` directive the parser does not use,
+  including `#KODIPROP`, `#EXTGRP` and `#EXT-X-*`.
+- A file with neither an `#EXTM3U` header nor any `#EXTINF` is not a playlist
+  and is a **startup error** — this is what makes a JSON file renamed `.m3u`
+  report as a malformed M3U rather than loading as an empty library.
+
+Attributes map onto the internal models: `tvg-logo` → channel `logo`, `tvg-id`
+→ `epg_channel_id`, and `group-title` → the channel `category` or the VOD
+category. `tvg-name` is the channel name only when the display title is empty.
+Every row's provider is `file`, and each live channel gets one default stream.
+
+Every M3U id is **derived**, because the format carries none: the same `ch-` /
+`vod-` / `str-` / `ep-` derivation and the same two-pass reservation the JSON
+path uses (see above), so reloading the same file yields the same ids, episodes
+of one series share their series' id, and two distinct rows whose derivation
+inputs are identical are suffixed rather than merged.
+
+#### Classification: group heuristics, and the guesswork that comes with them
+
+M3U carries no type, no ids and no parent/child links, so the library is
+**inferred** rather than translated. The rule is:
+
+> An entry is VOD when its `group-title` contains one of `movie`, `movies`,
+> `film`, `films`, `vod`, `series`, `show`, `shows` as a whole word — matched
+> case-insensitively and with surrounding whitespace ignored. Everything else is
+> a live channel.
+
+Whole-word matching means `Showtime` is a channel and `TV Shows` is VOD. The
+word list is **English-only**, deliberately: a group named in another language
+falls through to live channels. That is a stated limitation, not an oversight —
+widening the list (or making it configurable) is the owner's call, and the
+startup summary below names exactly which groups were treated as VOD so the
+fall-through is visible.
+
+This is a heuristic and it is expected to **misfile some content**. A film whose
+group is spelled in another language becomes a channel, and a series grouped
+under `Documentaries` (no keyword) does too. A user who cannot find a title
+should be able to read the summary log and see whether it was filed as a
+channel. Config-declared classification was considered and rejected, so there is
+no override — the log is the whole visibility story.
+
+#### Season and episode are parsed from titles
+
+Within a VOD group, a title is scanned for a season and episode number:
+
+| Shape | Example |
+|---|---|
+| `SxxExx` | `Breaking Bad S01E02` |
+| `NxNN` | `Breaking Bad 1x02` |
+| `Season N Episode M` | `Breaking Bad Season 1 Episode 2` |
+
+All are matched case-insensitively (`s01e02`, `SEASON 1 EPISODE 2`), and
+`Season N Ep M` is accepted too.
+
+- A title with a parseable season/episode becomes an **episode** of a series.
+  The series name is the title with the marker removed and surrounding
+  separators trimmed (`Breaking Bad S01E02` → `Breaking Bad`), and episodes that
+  share a series name and group land under **one** VOD entry, with type `Series`
+  and one shared id.
+- A VOD-classified entry whose title has **no** parseable season/episode is
+  still a VOD row, filed as a `Movie` with a single default `vod_stream` — it is
+  never dropped just because the title could not be parsed.
+- When the marker sits at the very start (`1x02 - Pilot`), the series name is
+  simply not in the title; the group name becomes the series name instead. This
+  is the most guess-prone step and will occasionally group two shows together or
+  split one.
+
+#### What the startup summary reports
+
+Because the classification is guesswork, the adapter logs what it decided, one
+line per category, when the server boots:
+
+```
+[source] m3u: read 1234 entries from /path/playlist.m3u (dropped 6: 5 #EXTINF without a URL, 1 bare URLs without #EXTINF)
+[source] m3u: 1180 live channels
+[source] m3u: 49 VOD rows across 8 series
+[source] m3u: 12 VOD titles had no parseable season/episode (filed as movies)
+[source] m3u: VOD group names: Movies, Series, TV Shows
+```
+
+Read top to bottom: entries read and dropped, how many became channels, how many
+became VOD and across how many series, how many VOD titles had no
+season/episode (filed as movies), and which group names were treated as VOD. A
+film missing from the VOD list was almost certainly counted as a channel here. A
+JSON playlist has no inference to report and logs none of this.
+
 ### Capabilities
 
 - **`StreamProbeLister` — supported.** A local playlist's live streams can be
@@ -475,14 +609,7 @@ id. An un-referenced child row is kept but unreachable through that parent.
 
 | Key | Required | Meaning |
 |---|---|---|
-| `ADOBOFLIX_FILE_PATH` | yes | Path to the JSON playlist. Unset or unreadable is a startup error. |
-
-### Not implemented: M3U
-
-These docs promise "JSON or M3U". Only the JSON form above is implemented
-today; an M3U playlist is a separate piece of work. The loader parses bytes
-into one in-memory library value and the query methods read that value, so an
-M3U parser can be added later without touching any query code.
+| `ADOBOFLIX_FILE_PATH` | yes | Path to the playlist (`.json`, `.m3u` or `.m3u8`). Unset, unreadable, or an unknown extension is a startup error. |
 
 ---
 

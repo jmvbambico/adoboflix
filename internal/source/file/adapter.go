@@ -25,6 +25,14 @@
 // Entry.SourceType is spelled "provider" and the rest are snake_case. See
 // docs/source-adapters.md for a complete worked example.
 //
+// The same adapter also loads an M3U/M3U8 playlist, selected by the file's
+// extension. An M3U file has no types, ids or child rows, so the library is
+// inferred rather than translated: entries in a group that reads as VOD become
+// VOD assets (episodes grouped under one series, or a movie when no
+// season/episode parses out of the title) and everything else becomes a live
+// channel. That inference is guesswork, so the startup path logs a short
+// summary of what it decided — see m3u.go and docs/source-adapters.md.
+//
 // # Ids are opaque
 //
 // An item's id is whatever the file provides; the adapter never parses it.
@@ -46,7 +54,9 @@ package file
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jmvbambico/adoboflix/internal/source"
@@ -71,18 +81,26 @@ func init() {
 	})
 }
 
-// Adapter is the file source. It holds the path it was loaded from and the
-// parsed, immutable library every query reads. No mutex is needed: the library
-// is never written after New returns.
+// Adapter is the file source. It holds the path it was loaded from, the parsed,
+// immutable library every query reads, and — for an M3U playlist only — the
+// summary of what the classifier inferred, which the startup path logs. No
+// mutex is needed: none of it is written after New returns.
 type Adapter struct {
-	path string
-	lib  *library
+	path    string
+	lib     *library
+	summary *m3uSummary
 }
 
-// New reads a playlist file and parses it into an Adapter. A path that cannot
-// be read returns ErrLibraryUnreadable; bytes that are not the documented JSON
-// envelope return ErrMalformedLibrary. Both name the path, so a startup
-// failure points at the file the user configured.
+// New reads a playlist file and parses it into an Adapter.
+//
+// The parser is chosen by the file's extension — .json, or .m3u/.m3u8 — never
+// by sniffing content, so a malformed playlist reports as malformed in the
+// format its extension selected and is never silently re-parsed as the other.
+// An extension this adapter does not know returns ErrUnsupportedFormat naming
+// the supported set. A path that cannot be read returns ErrLibraryUnreadable;
+// bytes that do not parse as the selected format return ErrMalformedLibrary.
+// Every one names the path, so a startup failure points at the file the user
+// configured.
 func New(path string) (*Adapter, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -92,11 +110,51 @@ func New(path string) (*Adapter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrLibraryUnreadable, path, err)
 	}
-	lib, err := parseLibrary(data)
+	lib, summary, err := parseByExtension(path, data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrMalformedLibrary, path, err)
+		return nil, err
 	}
-	return &Adapter{path: path, lib: lib}, nil
+	return &Adapter{path: path, lib: lib, summary: summary}, nil
+}
+
+// parseByExtension dispatches to the parser the extension selects. The M3U
+// branch also returns the classification summary; the JSON branch has no
+// inference to describe, so it returns nil.
+func parseByExtension(path string, data []byte) (*library, *m3uSummary, error) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case formatJSON:
+		lib, err := parseLibrary(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %s: %v", ErrMalformedLibrary, path, err)
+		}
+		return lib, nil, nil
+	case formatM3U, formatM3U8:
+		lib, summary, err := parseM3U(data)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %s: %v", ErrMalformedLibrary, path, err)
+		}
+		return lib, summary, nil
+	default:
+		ext := filepath.Ext(path)
+		if ext == "" {
+			ext = "(none)"
+		}
+		return nil, nil, fmt.Errorf("%w: %s: extension %s is not one of %s",
+			ErrUnsupportedFormat, path, ext, supportedFormats)
+	}
+}
+
+// logSummary prints the M3U classification summary at startup, one line per
+// category. It is a no-op for a JSON playlist, which carries no inference to
+// report. A user who cannot find a title can read these lines to see whether it
+// was filed as a channel or as VOD.
+func (a *Adapter) logSummary() {
+	if a.summary == nil {
+		return
+	}
+	for _, line := range a.summary.logLines(a.path) {
+		log.Print(line)
+	}
 }
 
 // Name returns the adapter's registered name.

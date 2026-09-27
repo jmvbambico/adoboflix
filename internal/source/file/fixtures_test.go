@@ -28,6 +28,33 @@ func newRawAdapter(t *testing.T, contents string) (*Adapter, error) {
 	return New(path)
 }
 
+// newRawM3UAdapter writes an M3U playlist to a temp .m3u file and opens it.
+func newRawM3UAdapter(t *testing.T, contents string) (*Adapter, error) {
+	t.Helper()
+	return newRawFileAt(t, "playlist.m3u", contents)
+}
+
+// mustRawM3UAdapter is newRawM3UAdapter for a playlist expected to load.
+func mustRawM3UAdapter(t *testing.T, contents string) *Adapter {
+	t.Helper()
+	adapter, err := newRawM3UAdapter(t, contents)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return adapter
+}
+
+// newRawFileAt writes contents to a temp file with the chosen name and opens
+// it, so a test can pick the extension the format selector sees.
+func newRawFileAt(t *testing.T, name, contents string) (*Adapter, error) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	return New(path)
+}
+
 // derivedFixture has no ids anywhere, so the adapter must synthesise stable
 // ones for the channel and the entry.
 const derivedFixture = `{
