@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,12 +53,28 @@ const Name = "adobotv-http"
 // the provider is the platform itself.
 const sourceType = "adobotv"
 
-// The adapter must satisfy the read-only boundary and can supply the compiled
-// EPG bytes. It must NOT satisfy StreamProbeLister; that omission is what
-// keeps the optional capability honest.
+// minBilledTill is the earliest billed_till AdoboFlix treats as a real expiry:
+// 2019-01-01T00:00:00Z. Anything earlier is refused as a sentinel rather than
+// rendered as a date.
+//
+// Upstream sends "0" for accounts whose expiry must be hidden, which alone
+// renders as "1 Jan 1970"; but every value through the end of 1970 (1 to
+// 31535999) is equally indistinguishable from that sentinel, and none is a
+// plausible subscription date for a platform that did not exist then. The floor
+// is set far above that band and far below any real AdoboTV subscription, so it
+// never rejects a genuine lapse — a 2019-or-later expiry is real information and
+// is still shown. It is deliberately not an upper bound: a far-future lifetime
+// or reseller expiry is also real.
+const minBilledTill = 1546300800 // 2019-01-01T00:00:00Z
+
+// The adapter must satisfy the read-only boundary, can supply the compiled EPG
+// bytes, and can describe the subscriber's account. It must NOT satisfy
+// StreamProbeLister; that omission is what keeps the optional capability
+// honest.
 var (
 	_ source.Source              = (*Adapter)(nil)
 	_ source.CompiledEPGProvider = (*Adapter)(nil)
+	_ source.AccountInfoProvider = (*Adapter)(nil)
 )
 
 func init() {
@@ -550,6 +567,46 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 	}
 	sum := sha256.Sum256(body)
 	return body, hex.EncodeToString(sum[:]), nil
+}
+
+// --- account (optional capability) ------------------------------------------
+
+// AccountInfo reports the account facts the playlist envelope carries: the
+// operator's user_message and the subscription's billing expiry.
+//
+// It is cache-only: it reads the envelope only when it is already warm and
+// never triggers a fetch. /api/v1/source/status calls this to decorate its
+// response, and that endpoint must stay fast, so a cold cache reports
+// ErrAccountInfoUnavailable and the facts appear on a later poll once the
+// library has fetched the envelope — which a normal app load does anyway.
+// Making status wait on upstream here would let an unreachable AdoboTV stall
+// the account UI for the client's whole 30s timeout.
+//
+// billed_till is a string of unix seconds upstream. It is absent for
+// non-subscription tiers, and upstream currently sends "0" — rather than
+// omitting the field — for accounts whose expiry must not be shown (AdoboTV's
+// own hiding task is outstanding). A value below minBilledTill is treated as
+// that sentinel rather than a date, because rendering it would assert an expiry
+// we do not know (see minBilledTill); so is a value that is present but not a
+// unix-seconds integer. Either way it is treated exactly like an absent field
+// and cannot hide a perfectly good user_message. A real expiry — past or future
+// — keeps its value: a lapsed subscription is information, not silence.
+func (a *Adapter) AccountInfo(ctx context.Context) (source.AccountInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return source.AccountInfo{}, err
+	}
+	env := a.cachedEnvelope()
+	if env == nil {
+		return source.AccountInfo{}, source.ErrAccountInfoUnavailable
+	}
+	info := source.AccountInfo{UserMessage: strings.TrimSpace(env.Provider.UserMessage)}
+	if raw := strings.TrimSpace(env.Provider.BilledTill); raw != "" {
+		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil && secs >= minBilledTill {
+			expiry := time.Unix(secs, 0).UTC()
+			info.SubscriptionExpiresAt = &expiry
+		}
+	}
+	return info, nil
 }
 
 // --- helpers ----------------------------------------------------------------

@@ -248,11 +248,20 @@ export async function resolveEpisode(episodeId: string): Promise<ResolvedStream>
 // ── Source / playlist code API ─────────────────────────────────────
 
 // What the active source is and whether it can serve content yet. The server
-// never returns the code itself; status exposes only these booleans.
+// never returns the code itself; status exposes only facts, never the
+// credential.
+//
+// subscription_expires_at and user_message are additive: the server includes
+// them only when the active source can supply account facts AND upstream
+// reported them. Absent means "upstream did not say", which is normal for a
+// source with no account concept (a local file, the development database) and
+// for a non-subscription tier.
 export interface SourceStatus {
   source: string;
   needs_playlist_code: boolean;
   playlist_code_configured: boolean;
+  subscription_expires_at?: string; // RFC3339, e.g. "2030-01-01T00:00:00Z"
+  user_message?: string;
 }
 
 export function fetchSourceStatus(): Promise<SourceStatus> {

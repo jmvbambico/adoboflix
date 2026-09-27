@@ -36,3 +36,15 @@ func TestNewRejectsNilHandle(t *testing.T) {
 		t.Fatal("New(nil) = nil error, want a failure")
 	}
 }
+
+// AccountInfoProvider describes a subscriber's AdoboTV account; the development
+// tap reads the schema directly and has no account concept, so it must not
+// implement the capability. A typed nil is enough: this is a compile-time
+// property, and the assertion never calls a method.
+func TestDoesNotImplementAccountInfoProvider(t *testing.T) {
+	var adapter *Adapter
+	var asSource source.Source = adapter
+	if _, ok := asSource.(source.AccountInfoProvider); ok {
+		t.Error("postgres-direct must NOT implement source.AccountInfoProvider: it has no account concept")
+	}
+}

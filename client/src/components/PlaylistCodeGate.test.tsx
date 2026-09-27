@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import { ApiError } from "../api/client";
+import { ApiError, type SourceStatus } from "../api/client";
 import PlaylistCodeGate from "./PlaylistCodeGate";
+import { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
 
 // A minimal Response the component's api layer can consume. Avoids depending on
 // a global Response being present in the jsdom environment.
@@ -130,22 +131,36 @@ describe("PlaylistCodeGate — entry", () => {
     expect(screen.getByRole("button", { name: /connect/i })).toBeInTheDocument();
   });
 
-  it("shows no entry form when a code is already configured, and offers to clear it", async () => {
+  // The connected happy path is silent. The gate no longer renders a
+  // "configured" panel or a Clear control — the account menu owns disconnecting
+  // — so this asserts the whole gate subtree is gone, not merely the form.
+  // Paired with the entry tests: not connected → form; connected → nothing.
+  it("renders nothing when a code is already configured", async () => {
     installBackend({ configured: true });
-    renderGate();
+    const { container, queryClient } = renderGate();
 
-    // Positive: the configured state is rendered with its clear action.
-    expect(await screen.findByRole("button", { name: /clear playlist code/i })).toBeInTheDocument();
-    // Negative: the credential field is not offered when one is configured.
+    // Guarantee the status has actually RESOLVED before measuring. The gate
+    // renders nothing both while loading (status undefined) and when connected,
+    // so an absence on its own would pass on the first tick — before the query
+    // settled — and would stay green even if a configured panel came back.
+    // Waiting for the resolved data makes the emptiness assertion meaningful.
+    await waitFor(() =>
+      expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toBeDefined(),
+    );
+
+    expect(container.firstChild).toBeNull();
+    // Negative: neither the credential field nor a duplicate clear action.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /clear playlist code/i })).not.toBeInTheDocument();
   });
 
   it("renders nothing for a source that takes no playlist code", async () => {
     installBackend({ needs: false, configured: false });
-    const { container } = renderGate();
+    const { container, queryClient } = renderGate();
 
+    // As above: wait for the resolved status, then assert the emptiness.
     await waitFor(() =>
-      expect(screen.queryByRole("heading", { name: /playlist code/i })).not.toBeInTheDocument(),
+      expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toBeDefined(),
     );
     expect(container.firstChild).toBeNull();
   });
@@ -157,14 +172,14 @@ describe("PlaylistCodeGate — entry", () => {
     expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
   });
 
-  it("defers to server truth: a configured status suppresses the form even for a required error", async () => {
+  it("defers to server truth: a configured status renders nothing even for a required error", async () => {
     installBackend({ configured: true });
-    renderGate([new ApiError("needs a code", 403, "playlist_code_required")]);
+    const { container } = renderGate([new ApiError("needs a code", 403, "playlist_code_required")]);
 
-    // Positive: the configured state wins.
-    expect(await screen.findByRole("button", { name: /clear playlist code/i })).toBeInTheDocument();
-    // Negative: an old error does not force a redundant re-entry.
-    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+    // The required error momentarily shows the form until the status resolves;
+    // once it says configured, server truth wins and the gate goes quiet.
+    await waitFor(() => expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument());
+    expect(container.firstChild).toBeNull();
   });
 });
 
@@ -262,13 +277,21 @@ describe("PlaylistCodeGate — saved outcomes", () => {
     await screen.findByRole("heading", { name: /playlist code saved/i });
     first.unmount();
 
-    renderGateWith(queryClient);
+    const remounted = renderGateWith(queryClient);
+
+    // Positive guarantee before the absences: the shared cache really does say
+    // configured, so the emptiness below measures the connected state and not an
+    // unresolved query.
+    expect(queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY)).toMatchObject({
+      playlist_code_configured: true,
+    });
 
     // Negative: an ordinary remount must not resurrect the entry form for a
     // code the server already saved.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
-    // Positive: the configured state is what shows instead.
-    expect(screen.getByRole("heading", { name: /playlist code configured/i })).toBeInTheDocument();
+    // And the connected state is silent — the gate renders nothing, having no
+    // configured panel to show either.
+    expect(remounted.container.firstChild).toBeNull();
   });
 });
 
@@ -356,14 +379,7 @@ describe("PlaylistCodeGate — success", () => {
   });
 });
 
-describe("PlaylistCodeGate — clearing", () => {
-  it("sends DELETE when the clear control is used, then re-offers entry", async () => {
-    const backend = installBackend({ configured: true });
-    renderGate();
-
-    fireEvent.click(await screen.findByRole("button", { name: /clear playlist code/i }));
-
-    await waitFor(() => expect(backend.calls.some((c) => c.method === "DELETE")).toBe(true));
-    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
-  });
-});
+// Clearing a code is no longer the gate's job: it is the account menu's
+// Disconnect, with its own confirmation. That path — including the DELETE — is
+// covered in AccountMenu.test.tsx; the gate deliberately renders no clear
+// control to duplicate it.

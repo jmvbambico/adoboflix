@@ -4,48 +4,10 @@
  */
 
 import { useState, type FormEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CircleCheck, KeyRound, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
-import {
-  clearPlaylistCode,
-  fetchSourceStatus,
-  isApiError,
-  setPlaylistCode,
-  type SourceStatus,
-} from "../api/client";
-import { describeSourceError, sourceStatusCopy, type SourceStatusCopy } from "./sourceStatus";
-
-export const SOURCE_STATUS_QUERY_KEY = ["source-status"] as const;
-
-// Codes for which the server kept the submitted code: it proved the code itself
-// valid and only a gate outside the code's control remains. This mirrors
-// playlistCodeProvenValid in internal/handler/source_control.go — the two must
-// stay in step, or the form would tell a user to re-enter a code the server
-// already saved.
-const SAVED_GATE_CODES = new Set([
-  "device_pending",
-  "subscription_inactive",
-  "playlist_format_m3u",
-  "content_token_rejected",
-  "content_not_found",
-]);
-
-// A saved code is not a failure. Say plainly that nothing needs re-entering and
-// why playback has not started yet, so a first connect does not send the user
-// back to retype a code that is already on the server.
-const SAVED_REASSURANCE: Record<string, string> = {
-  device_pending:
-    "AdoboTV accepted this code and AdoboFlix saved it on the server. Nothing needs re-entering — playback starts on its own once the AdoboTV operator approves this device.",
-  subscription_inactive:
-    "AdoboTV accepted this code and AdoboFlix saved it on the server. Nothing needs re-entering — playback starts on its own once your subscription is active again.",
-};
-const SAVED_REASSURANCE_DEFAULT =
-  "AdoboTV accepted this code and AdoboFlix saved it on the server. Nothing needs re-entering.";
-
-type Outcome =
-  | { kind: "saved"; copy: SourceStatusCopy }
-  | { kind: "failed"; copy: SourceStatusCopy }
-  | null;
+import { useQueryClient } from "@tanstack/react-query";
+import { KeyRound, LoaderCircle, RefreshCw } from "lucide-react";
+import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
+import { savedReassurance, usePlaylistCodeController } from "./playlistCode";
 
 interface PlaylistCodeGateProps {
   // Errors from requests the caller already issued. Any carrying
@@ -55,19 +17,21 @@ interface PlaylistCodeGateProps {
   errors?: unknown[];
 }
 
-// PlaylistCodeGate is the only place a playlist code is entered. It never
+// PlaylistCodeGate is the inline entry point for a playlist code. It never
 // renders the code back, never logs it, never puts it in a URL, and never
 // touches browser storage: the code lives on the server, and the input is
-// cleared the moment it is submitted.
+// cleared the moment it is submitted. The submit/gate-code handling lives in
+// usePlaylistCodeController, shared with the account menu's modal.
+//
+// It renders only when there is something to do — enter a code, or report a
+// connect outcome. A happily-configured source renders nothing: the account
+// menu owns disconnecting, with its own confirmation, so a permanent panel
+// above the content would be redundant chrome (and a second route to the same
+// destructive action) for someone with nothing to fix.
 export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps) {
   const queryClient = useQueryClient();
   const [code, setCode] = useState("");
-  const [outcome, setOutcome] = useState<Outcome>(null);
-
-  const statusQuery = useQuery<SourceStatus>({
-    queryKey: SOURCE_STATUS_QUERY_KEY,
-    queryFn: fetchSourceStatus,
-  });
+  const { statusQuery, submit, submitCode, outcome } = usePlaylistCodeController();
 
   const needsCode = Boolean(statusQuery.data?.needs_playlist_code);
   const configured = Boolean(statusQuery.data?.playlist_code_configured);
@@ -75,58 +39,16 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
     (error) => describeSourceError(error).code === "playlist_code_required",
   );
 
-  const submit = useMutation({
-    mutationFn: (value: string) => setPlaylistCode(value),
-    onSuccess: () => {
-      // The server already validated the code and swapped the adapter. Drop
-      // every cached answer so the library refetches against the new source;
-      // a page reload would throw away the session for nothing.
-      queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
-        prev ? { ...prev, playlist_code_configured: true } : prev,
-      );
-      queryClient.invalidateQueries();
-      setOutcome(null);
-    },
-    onError: (error) => {
-      // A gate that proves the code valid leaves it persisted; the rest persist
-      // nothing and the user must correct the code.
-      if (isApiError(error) && error.code && SAVED_GATE_CODES.has(error.code)) {
-        // The server kept the code, so record that in the status cache too.
-        // Without this the cache still says "not configured", and a remount
-        // inside the stale window would ask for a code that is already saved —
-        // exactly the retype this feature exists to prevent. Invalidate the
-        // status key as well so a fresh read replaces the optimistic one.
-        queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
-          prev ? { ...prev, playlist_code_configured: true } : prev,
-        );
-        queryClient.invalidateQueries({ queryKey: SOURCE_STATUS_QUERY_KEY });
-        setOutcome({ kind: "saved", copy: describeSourceError(error) });
-        return;
-      }
-      setOutcome({ kind: "failed", copy: describeSourceError(error) });
-    },
-  });
-
-  const clear = useMutation({
-    mutationFn: () => clearPlaylistCode(),
-    onSuccess: () => {
-      queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
-        prev ? { ...prev, playlist_code_configured: false } : prev,
-      );
-      queryClient.invalidateQueries();
-      setOutcome(null);
-    },
-  });
-
   const saved = outcome?.kind === "saved";
   const failed = outcome?.kind === "failed" ? outcome.copy : null;
   // Defer to server truth: once the status says a code is configured, do not
   // keep forcing the form just because a request once failed or an old error
   // still asks for a code.
   const showForm = !saved && !configured && (needsCode || requestNeedsEntry || failed !== null);
-  const showConfigured = !saved && !showForm && needsCode && configured;
 
-  if (!saved && !showForm && !showConfigured) return null;
+  // Nothing to do and nothing to report: cover the connected happy path with no
+  // chrome at all.
+  if (!saved && !showForm) return null;
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -135,9 +57,7 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
     // Clear before the request settles: the entered value must not stay in the
     // mounted DOM, and on failure the user retypes against the error copy.
     setCode("");
-    // Drop the mutation's retained variables once it settles, so the code is
-    // not kept in React Query state after it has been sent.
-    submit.mutate(value, { onSettled: () => submit.reset() });
+    submitCode(value);
   };
 
   return (
@@ -156,20 +76,10 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
                 Playlist code saved
               </h4>
               <p className="text-xs sm:text-sm text-slate-300 leading-relaxed max-w-2xl">
-                {SAVED_REASSURANCE[outcome.copy.code ?? ""] ?? SAVED_REASSURANCE_DEFAULT}
+                {savedReassurance(outcome.copy.code)}
               </p>
               <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
                 {outcome.copy.message}
-              </p>
-            </>
-          ) : showConfigured ? (
-            <>
-              <h4 className="font-display font-bold text-sm text-slate-100 tracking-wide">
-                Playlist code configured
-              </h4>
-              <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
-                This player is connected to AdoboTV with a playlist code held on the server. Clear
-                it to disconnect, or to fall back to the environment configuration.
               </p>
             </>
           ) : (
@@ -227,24 +137,6 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
           <RefreshCw className="w-3.5 h-3.5" />
           Check again
         </button>
-      )}
-
-      {showConfigured && (
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full flex items-center gap-1.5">
-            <CircleCheck className="w-3.5 h-3.5" />
-            {statusQuery.data?.source ?? "source"} ready
-          </span>
-          <button
-            type="button"
-            onClick={() => clear.mutate()}
-            disabled={clear.isPending}
-            className="px-3 py-1.5 rounded-lg border border-white/10 text-slate-300 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 text-[11px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer focus:outline-none disabled:opacity-50"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            {clear.isPending ? "Clearing…" : "Clear playlist code"}
-          </button>
-        </div>
       )}
     </section>
   );

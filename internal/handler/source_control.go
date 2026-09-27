@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"errors"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/playlistcode"
@@ -63,13 +65,58 @@ func NewSourceHandler(player *PlayerHandler, store *playlistcode.Store, cfg sour
 // whether one is currently configured. It never returns the code itself. The
 // client uses needs_playlist_code to decide whether to offer the entry form and
 // playlist_code_configured to know whether the source can serve content yet.
+//
+// Two account facts are added when — and only when — the active adapter can
+// supply them AND a credential is configured to read them with: the
+// subscription's billing expiry (subscription_expires_at, RFC3339) and the
+// operator's own message (user_message). They are additive and best-effort:
+// a source with no account concept (file, postgres-direct), a missing
+// credential, or a cold cache leaves them out and the endpoint still answers
+// 200 with the fields above unchanged. No tier or plan label is ever invented
+// here.
+//
+// The account read is cache-only and context-aware (see
+// source.AccountInfoProvider): it never triggers an upstream fetch, so this
+// endpoint cannot stall on a slow or unreachable AdoboTV. When the cache is
+// cold the fields are omitted and appear on a later poll, once the library has
+// loaded the envelope — which a normal app load does anyway.
 func (h *SourceHandler) GetStatus(c *gin.Context) {
 	needs, configured := h.state()
-	c.JSON(http.StatusOK, gin.H{
+	body := gin.H{
 		"source":                   h.cfg.Name,
 		"needs_playlist_code":      needs,
 		"playlist_code_configured": configured,
-	})
+	}
+
+	// Only a source that takes a code has anything to read account facts from;
+	// without a configured code there is no playlist to decorate the status
+	// with.
+	if configured {
+		if provider, ok := h.player.src().(source.AccountInfoProvider); ok {
+			info, err := provider.AccountInfo(c.Request.Context())
+			switch {
+			case err == nil:
+				if info.SubscriptionExpiresAt != nil {
+					body["subscription_expires_at"] = info.SubscriptionExpiresAt.UTC().Format(time.RFC3339)
+				}
+				if msg := strings.TrimSpace(info.UserMessage); msg != "" {
+					body["user_message"] = msg
+				}
+			case errors.Is(err, source.ErrAccountInfoUnavailable):
+				// Nothing cached yet (or the client went away): a normal, silent
+				// omission for a best-effort decoration, not a failure to log.
+			case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+				// The caller cancelled mid-read; there is no one to tell.
+			default:
+				// A real adapter fault. The account facts are a nicety, not part
+				// of the contract, so it is logged and the fields are omitted
+				// rather than turning the status endpoint into an error.
+				log.Printf("source status: account info unavailable for %q: %v", h.cfg.Name, err)
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, body)
 }
 
 // SetPlaylistCode accepts a playlist code, validates it against AdoboTV with a
