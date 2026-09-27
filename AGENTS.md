@@ -78,14 +78,20 @@ does not repair.
 Run before every commit. These are the full gate:
 
 ```bash
-go build ./cmd/server      # must compile
-go vet ./...               # must be clean
-cd client && npm run lint  # tsc --noEmit, must be clean
+go build ./cmd/server          # must compile
+go vet ./...                   # must be clean
+cd client && npm run lint      # tsc --noEmit, must be clean
+cd client && npm run test:run  # vitest, must be green
 ```
 
-Worker-scope agents run all three — they are fast, hermetic, and touch no
+Worker-scope agents run all four — they are fast, hermetic, and touch no
 shared state. There is no integration suite yet; when one is added it runs only
 on the integration branch.
+
+`npm run test:run` is the non-watch form; `npm test` watches. Both need
+devDependencies present, so an environment with `NODE_ENV=production` needs
+`npm ci --include=dev` — `npm ci` alone omits them and the command will not
+be found.
 
 ---
 
