@@ -4,10 +4,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { KeyRound, LogOut, RefreshCw, User } from "lucide-react";
-import { describeSourceError } from "./sourceStatus";
+import { FileUp, KeyRound, LogOut, RefreshCw, User } from "lucide-react";
+import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
 import { usePlaylistCodeController } from "./playlistCode";
+import { activeSourceLabel, isPinned, selectableModes } from "./sourceModes";
 import PlaylistCodeModal from "./PlaylistCodeModal";
+import PlaylistImportModal from "./PlaylistImportModal";
+
+type AccountModal = "code" | "import" | null;
 
 // formatExpiry renders the RFC3339 billing expiry the server reported. An
 // unparseable value is shown verbatim rather than as "Invalid Date".
@@ -23,10 +27,15 @@ function formatExpiry(iso: string): string {
 // so "log in" is connecting a playlist code and "log out" is disconnecting it —
 // the only credential a subscriber has. Nothing here invents a tier, a plan
 // label, or a display name: it shows only what the server reports.
+//
+// The offered actions are derived from the server's modes list, never from an
+// adapter name. A development harness is labelled as one and never printed as a
+// user's choice; an env-pinned source explains that its mode cannot change and
+// disables the actions that would fail with 409.
 export default function AccountMenu() {
   const [open, setOpen] = useState(false);
   const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
-  const [modalOpen, setModalOpen] = useState(false);
+  const [accountModal, setAccountModal] = useState<AccountModal>(null);
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -38,11 +47,18 @@ export default function AccountMenu() {
   const status = statusQuery.data;
   const needsCode = Boolean(status?.needs_playlist_code);
   const configured = Boolean(status?.playlist_code_configured);
+  const dev = Boolean(status?.dev);
+  const pinned = isPinned(status);
   // Loading and failure are NOT "this source has no account concept". Until an
   // answer arrives we know nothing about whether a code is needed, so the menu
   // must not assert one.
   const statusResolved = status !== undefined;
   const statusFailed = statusQuery.isError && !statusResolved;
+
+  const offers = selectableModes(status);
+  const hasCodeOffer = offers.some((mode) => mode.needs_playlist_code);
+  const hasFileOffer = offers.some((mode) => !mode.needs_playlist_code);
+  const codeOffered = needsCode && configured ? "Change playlist code" : "Login to AdoboTV";
 
   const disconnectError = clear.isError ? describeSourceError(clear.error) : null;
 
@@ -117,15 +133,15 @@ export default function AccountMenu() {
     }
   };
 
-  const openModal = () => {
-    setModalOpen(true);
+  const openModal = (kind: Exclude<AccountModal, null>) => {
+    setAccountModal(kind);
     closeMenu(false);
   };
 
-  // Return focus to the avatar when the modal closes, so it does not fall to
+  // Return focus to the avatar when a modal closes, so it does not fall to
   // <body> as the focused input unmounts.
   const closeModal = useCallback(() => {
-    setModalOpen(false);
+    setAccountModal(null);
     buttonRef.current?.focus();
   }, []);
 
@@ -166,7 +182,7 @@ export default function AccountMenu() {
               Active source
             </span>
             <span className="text-sm font-semibold text-slate-100">
-              {status?.source ?? (statusFailed ? "—" : "…")}
+              {statusResolved ? activeSourceLabel(status) : statusFailed ? "—" : "…"}
             </span>
             {!statusResolved ? (
               statusFailed ? (
@@ -178,7 +194,7 @@ export default function AccountMenu() {
                   Checking the active source…
                 </span>
               )
-            ) : needsCode ? (
+            ) : dev ? null : needsCode ? (
               <span
                 className={`text-[11px] font-medium ${
                   configured ? "text-emerald-400" : "text-amber-300"
@@ -188,7 +204,7 @@ export default function AccountMenu() {
               </span>
             ) : (
               <span className="text-[11px] leading-relaxed text-slate-400">
-                No account needed — this source reads a local file or the database directly.
+                No account needed — this source reads a local playlist.
               </span>
             )}
             {statusResolved && status?.subscription_expires_at && (
@@ -218,50 +234,73 @@ export default function AccountMenu() {
             </>
           )}
 
-          {statusResolved && needsCode && (
+          {statusResolved && (
             <>
               <div className="h-px bg-white/5" role="none" />
 
-              {confirmingDisconnect ? (
-                <div className="flex flex-col gap-2" role="none">
-                  <p className="text-[11px] leading-relaxed text-slate-300">
-                    Disconnecting removes the saved playlist code from this server. You will need to
-                    type it in again in full.
-                  </p>
-                  <button
-                    ref={confirmYesRef}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setConfirmingDisconnect(false);
-                      clear.mutate();
-                    }}
-                    disabled={clear.isPending}
-                    className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 hover:bg-red-500/20 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none disabled:opacity-50"
-                  >
-                    {clear.isPending ? "Disconnecting…" : "Yes, disconnect"}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => setConfirmingDisconnect(false)}
-                    className="px-3 py-2 rounded-lg border border-white/10 text-slate-300 hover:bg-white/5 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              ) : (
+              {pinned && (
+                <p className="px-1 text-[11px] leading-relaxed text-amber-300/90">
+                  {sourceStatusCopy("source_pinned_by_env").message}
+                </p>
+              )}
+
+              {hasCodeOffer && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={pinned}
+                  onClick={() => openModal("code")}
+                  className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <KeyRound className="w-3.5 h-3.5" />
+                  {codeOffered}
+                </button>
+              )}
+
+              {hasFileOffer && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={pinned}
+                  onClick={() => openModal("import")}
+                  className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <FileUp className="w-3.5 h-3.5" />
+                  Import Local Playlist
+                </button>
+              )}
+
+              {needsCode && configured && (
                 <>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={openModal}
-                    className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none"
-                  >
-                    <KeyRound className="w-3.5 h-3.5" />
-                    {configured ? "Change playlist code" : "Connect playlist code"}
-                  </button>
-                  {configured && (
+                  {confirmingDisconnect ? (
+                    <div className="flex flex-col gap-2" role="none">
+                      <p className="text-[11px] leading-relaxed text-slate-300">
+                        Disconnecting removes the saved playlist code from this server. You will need
+                        to type it in again in full.
+                      </p>
+                      <button
+                        ref={confirmYesRef}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setConfirmingDisconnect(false);
+                          clear.mutate();
+                        }}
+                        disabled={clear.isPending}
+                        className="px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 hover:bg-red-500/20 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none disabled:opacity-50"
+                      >
+                        {clear.isPending ? "Disconnecting…" : "Yes, disconnect"}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => setConfirmingDisconnect(false)}
+                        className="px-3 py-2 rounded-lg border border-white/10 text-slate-300 hover:bg-white/5 text-[11px] font-semibold text-left transition-all cursor-pointer focus:outline-none"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
                     <button
                       ref={disconnectRef}
                       type="button"
@@ -285,7 +324,10 @@ export default function AccountMenu() {
         </div>
       )}
 
-      {modalOpen && <PlaylistCodeModal configured={configured} onClose={closeModal} />}
+      {accountModal === "code" && (
+        <PlaylistCodeModal configured={configured} onClose={closeModal} />
+      )}
+      {accountModal === "import" && <PlaylistImportModal onClose={closeModal} />}
     </div>
   );
 }

@@ -189,6 +189,24 @@ async function sendJSON<T>(method: string, url: string, body?: unknown): Promise
   return res.json() as Promise<T>;
 }
 
+// Send a raw string body and decode a JSON reply. The playlist-import endpoint
+// reads the playlist itself as the request body (it is not a JSON envelope with
+// the content nested inside), so it cannot go through sendJSON, which would
+// stringify it a second time. A non-OK reply maps through the same ApiError
+// path, so the server's stable code and its parse message reach the caller.
+async function sendRaw<T>(method: string, url: string, body: string): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw apiErrorFromResponse(res.status, url, text);
+  }
+  return res.json() as Promise<T>;
+}
+
 export async function fetchVideos(params: {
   search?: string;
   category?: string;
@@ -247,9 +265,28 @@ export async function resolveEpisode(episodeId: string): Promise<ResolvedStream>
 
 // ── Source / playlist code API ─────────────────────────────────────
 
+// One registered source adapter as status reports it. The client renders the
+// user's choices from these flags — name is never matched against to decide
+// what to offer, because that is exactly what the flags exist to avoid.
+export interface SourceMode {
+  name: string;
+  selectable: boolean;
+  dev: boolean;
+  active: boolean;
+  configured: boolean;
+  needs_playlist_code: boolean;
+}
+
 // What the active source is and whether it can serve content yet. The server
 // never returns the code itself; status exposes only facts, never the
 // credential.
+//
+// active/origin/dev/playlist_file_configured/modes describe the source choice:
+// whether any source is configured, where it came from ("env" pinned by
+// ADOBOFLIX_SOURCE, "stored" a mode the user chose in the UI, or "none"), and
+// whether it is a development harness the UI must not present as a normal
+// option. A sourceless server is a normal state: the UI offers its choices from
+// modes where selectable is true.
 //
 // subscription_expires_at and user_message are additive: the server includes
 // them only when the active source can supply account facts AND upstream
@@ -258,8 +295,13 @@ export async function resolveEpisode(episodeId: string): Promise<ResolvedStream>
 // for a non-subscription tier.
 export interface SourceStatus {
   source: string;
+  active: boolean;
+  origin: "env" | "stored" | "none";
+  dev: boolean;
   needs_playlist_code: boolean;
   playlist_code_configured: boolean;
+  playlist_file_configured: boolean;
+  modes: SourceMode[];
   subscription_expires_at?: string; // RFC3339, e.g. "2030-01-01T00:00:00Z"
   user_message?: string;
 }
@@ -280,6 +322,16 @@ export function setPlaylistCode(code: string): Promise<SourceStatus> {
 // remains (an environment fallback, or the unconfigured state).
 export function clearPlaylistCode(): Promise<SourceStatus> {
   return sendJSON<SourceStatus>("DELETE", `${API_BASE}/source/playlist-code`);
+}
+
+// Import a local playlist as the file mode. The content is the file the user
+// chose, read client-side and sent as the request body (JSON envelope, M3U or
+// M3U8 — the server detects the format). On success the server has already
+// swapped the live source, so the returned status is the new truth. On failure
+// the rejection names what the parser found wrong; it must reach the user
+// unchanged.
+export function importPlaylistFile(content: string): Promise<SourceStatus> {
+  return sendRaw<SourceStatus>("POST", `${API_BASE}/source/playlist-file`, content);
 }
 
 // ── IPTV Channel API ───────────────────────────────────────────────

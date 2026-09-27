@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
+import type { SourceMode } from "../api/client";
 import AccountMenu from "./AccountMenu";
 
 // A minimal Response the component's api layer can consume. Avoids depending on
@@ -20,16 +21,65 @@ interface FetchCall {
   method: string;
 }
 
+// The full status contract the server reports. The menu renders its choices
+// from modes, never from the adapter names, so the mocks carry real flags.
 interface StatusShape {
   source: string;
+  active: boolean;
+  origin: "env" | "stored" | "none";
+  dev: boolean;
   needs_playlist_code: boolean;
   playlist_code_configured: boolean;
+  playlist_file_configured: boolean;
+  modes: SourceMode[];
   subscription_expires_at?: string;
   user_message?: string;
 }
 
 const STATUS_URL = "/api/v1/source/status";
 const CODE_URL = "/api/v1/source/playlist-code";
+
+const CODE_MODE: SourceMode = {
+  name: "adobotv-http",
+  selectable: true,
+  dev: false,
+  active: false,
+  configured: false,
+  needs_playlist_code: true,
+};
+const FILE_MODE: SourceMode = {
+  name: "file",
+  selectable: true,
+  dev: false,
+  active: false,
+  configured: false,
+  needs_playlist_code: false,
+};
+
+// modeModes is the default two selectable modes with the named one active.
+function modesFor(activeName: "adobotv-http" | "file" | "", configured: boolean): SourceMode[] {
+  return [
+    {
+      ...CODE_MODE,
+      active: activeName === "adobotv-http",
+      configured: activeName === "adobotv-http" && configured,
+    },
+    { ...FILE_MODE, active: activeName === "file", configured: activeName === "file" },
+  ];
+}
+
+function defaultStatus(activeName: "adobotv-http" | "file" | "", configured: boolean): StatusShape {
+  return {
+    source: activeName,
+    active: activeName !== "",
+    origin: activeName === "" ? "none" : "stored",
+    dev: false,
+    needs_playlist_code: activeName === "adobotv-http",
+    playlist_code_configured: activeName === "adobotv-http" && configured,
+    playlist_file_configured: activeName === "file",
+    modes: modesFor(activeName, configured),
+  };
+}
 
 interface BackendOptions extends Partial<StatusShape> {
   // The status the DELETE returns. >= 300 simulates a failed disconnect.
@@ -41,12 +91,7 @@ interface BackendOptions extends Partial<StatusShape> {
 // made until the user confirmed.
 function installBackend(init: BackendOptions = {}) {
   const { deleteStatus = 200, ...statusInit } = init;
-  const status: StatusShape = {
-    source: "adobotv-http",
-    needs_playlist_code: true,
-    playlist_code_configured: false,
-    ...statusInit,
-  };
+  const status: StatusShape = { ...defaultStatus("adobotv-http", false), ...statusInit };
   const calls: FetchCall[] = [];
 
   vi.stubGlobal(
@@ -71,30 +116,34 @@ function installBackend(init: BackendOptions = {}) {
   return { status, calls };
 }
 
-function renderMenu() {
+function renderMenu(init: BackendOptions = {}) {
+  const backend = installBackend(init);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
   });
-  return render(
+  render(
     <QueryClientProvider client={queryClient}>
       <AccountMenu />
     </QueryClientProvider>,
   );
+  return { backend, queryClient };
 }
 
-async function openMenu() {
+// openMenu opens the menu and waits for the status read to resolve, so every
+// assertion below measures the resolved state and not the loading one. The
+// expected label is the menu's own positive confirmation that resolution
+// happened.
+async function openMenu(queryClient: QueryClient, label = "AdoboTV account") {
   const button = screen.getByRole("button", { name: "Account menu" });
   fireEvent.click(button);
   await screen.findByRole("menu");
-  // The menu renders before the status query settles; wait for the active
-  // source so the assertions below see the resolved state, not the loading one.
-  await screen.findByText("adobotv-http");
+  await waitFor(() => expect(queryClient.getQueryData(["source-status"])).toBeDefined());
+  await screen.findByText(label);
   return button;
 }
 
 describe("AccountMenu", () => {
   it("is a labelled, keyboard-openable menu button", async () => {
-    installBackend();
     renderMenu();
 
     const button = screen.getByRole("button", { name: "Account menu" });
@@ -114,9 +163,8 @@ describe("AccountMenu", () => {
   });
 
   it("closes on Escape and returns focus to the avatar", async () => {
-    installBackend();
-    renderMenu();
-    const button = await openMenu();
+    const { queryClient } = renderMenu();
+    const button = await openMenu(queryClient);
 
     fireEvent.keyDown(document, { key: "Escape" });
 
@@ -125,30 +173,37 @@ describe("AccountMenu", () => {
   });
 
   it("closes on a click outside", async () => {
-    installBackend();
-    renderMenu();
-    await openMenu();
+    const { queryClient } = renderMenu();
+    await openMenu(queryClient);
 
     fireEvent.mouseDown(document.body);
 
     await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
   });
 
-  it("shows no playlist code is connected, and offers to connect", async () => {
-    installBackend({ playlist_code_configured: false });
-    renderMenu();
-    await openMenu();
+  it("names the active source in our words, never the adapter name", async () => {
+    const { queryClient } = renderMenu({ playlist_code_configured: true });
+    await openMenu(queryClient);
 
-    expect(screen.getByText("adobotv-http")).toBeInTheDocument();
+    // Positive: the user-facing name for the AdoboTV path.
+    expect(screen.getByText("AdoboTV account")).toBeInTheDocument();
+    // Negative: the raw adapter name is not presented as the user's choice.
+    expect(screen.queryByText("adobotv-http")).not.toBeInTheDocument();
+  });
+
+  it("shows no playlist code is connected, and offers to log in and import", async () => {
+    const { queryClient } = renderMenu({ playlist_code_configured: false });
+    await openMenu(queryClient);
+
     expect(screen.getByText("No playlist code yet")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /connect playlist code/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /login to adobotv/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /import local playlist/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /disconnect/i })).not.toBeInTheDocument();
   });
 
   it("shows the playlist code is connected, and offers change and disconnect", async () => {
-    installBackend({ playlist_code_configured: true });
-    renderMenu();
-    await openMenu();
+    const { queryClient } = renderMenu({ playlist_code_configured: true });
+    await openMenu(queryClient);
 
     expect(screen.getByText("Playlist code connected")).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /change playlist code/i })).toBeInTheDocument();
@@ -156,13 +211,12 @@ describe("AccountMenu", () => {
   });
 
   it("shows the subscription expiry and upstream message when reported", async () => {
-    installBackend({
+    const { queryClient } = renderMenu({
       playlist_code_configured: true,
       subscription_expires_at: "2030-01-01T00:00:00Z",
       user_message: "Renew by Friday.",
     });
-    renderMenu();
-    await openMenu();
+    await openMenu(queryClient);
 
     expect(screen.getByText(/subscription renews/i)).toBeInTheDocument();
     expect(screen.getByText(/2030/)).toBeInTheDocument();
@@ -173,12 +227,11 @@ describe("AccountMenu", () => {
   // account whose billed_till is the "0" sentinel), the menu says nothing about
   // a subscription — it must not invent a date, least of all 1 Jan 1970.
   it("renders no subscription line when the server reports no expiry", async () => {
-    installBackend({
+    const { queryClient } = renderMenu({
       playlist_code_configured: true,
       user_message: "Welcome to AdoboTV cryogenix!",
     });
-    renderMenu();
-    await openMenu();
+    await openMenu(queryClient);
 
     expect(screen.queryByText(/subscription renews/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/1970/)).not.toBeInTheDocument();
@@ -187,20 +240,93 @@ describe("AccountMenu", () => {
   });
 
   it("says plainly when the source needs no playlist code", async () => {
-    installBackend({ needs_playlist_code: false, playlist_code_configured: false });
-    renderMenu();
-    await openMenu();
+    const { queryClient } = renderMenu({
+      source: "file",
+      needs_playlist_code: false,
+      playlist_code_configured: false,
+      playlist_file_configured: true,
+      modes: modesFor("file", false),
+    });
+    await openMenu(queryClient, "Local playlist");
 
+    // Positive: our word for the local-playlist path, and the no-account note.
+    expect(screen.getByText("Local playlist")).toBeInTheDocument();
     expect(screen.getByText(/no account needed/i)).toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /connect playlist code/i })).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /change playlist code/i })).not.toBeInTheDocument();
+    // Negative: the raw adapter name is not printed as the user's choice.
+    expect(screen.queryByText("file")).not.toBeInTheDocument();
+    // The code path is still offered as a switch, labelled as a login, not as
+    // connecting a code to a source that takes none.
+    expect(screen.getByRole("menuitem", { name: /login to adobotv/i })).toBeInTheDocument();
     expect(screen.queryByRole("menuitem", { name: /disconnect/i })).not.toBeInTheDocument();
   });
 
+  // A development harness is labelled plainly as one and never by its adapter
+  // name; the owner's instruction was not to document it, so no copy explains
+  // it either.
+  it("labels a development source and never prints its adapter name", async () => {
+    const { queryClient, backend } = renderMenu({
+      source: "postgres-direct",
+      active: true,
+      origin: "env",
+      dev: true,
+      needs_playlist_code: false,
+      playlist_code_configured: false,
+      modes: [
+        CODE_MODE,
+        FILE_MODE,
+        {
+          name: "postgres-direct",
+          selectable: false,
+          dev: true,
+          active: true,
+          configured: false,
+          needs_playlist_code: false,
+        },
+      ],
+    });
+    await openMenu(queryClient, "Development source");
+
+    // Positive: the dev source is presented, in plain words.
+    expect(screen.getByText("Development source")).toBeInTheDocument();
+    // Negative: neither its adapter name nor the code-adapter name leaks as a
+    // user-facing choice.
+    expect(screen.queryByText("postgres-direct")).not.toBeInTheDocument();
+    expect(screen.queryByText("adobotv-http")).not.toBeInTheDocument();
+    // The raw name really is in the payload being rendered, so the absence
+    // above is not vacuous.
+    expect(backend.status.source).toBe("postgres-direct");
+  });
+
+  it("disables mode-changing actions and explains an env-pinned source", async () => {
+    const { queryClient } = renderMenu({
+      origin: "env",
+      active: true,
+      playlist_code_configured: true,
+    });
+    await openMenu(queryClient);
+
+    // Positive: the pin is explained and Disconnect — not mode-changing — is
+    // still offered.
+    expect(screen.getByText(/pinned to a content source by its server configuration/i)).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /disconnect/i })).toBeInTheDocument();
+    // Negative: the actions that would fail with 409 are disabled, not offered.
+    expect(screen.getByRole("menuitem", { name: /change playlist code/i })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: /import local playlist/i })).toBeDisabled();
+  });
+
+  it("opening the import action shows the file picker", async () => {
+    const { queryClient } = renderMenu({ needs_playlist_code: false, source: "file", modes: modesFor("file", false) });
+    await openMenu(queryClient, "Local playlist");
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /import local playlist/i }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByLabelText("Playlist file")).toBeInTheDocument();
+  });
+
   it("confirms before disconnecting, and only then calls DELETE", async () => {
-    const backend = installBackend({ playlist_code_configured: true });
-    renderMenu();
-    await openMenu();
+    const { backend, queryClient } = renderMenu({ playlist_code_configured: true });
+    await openMenu(queryClient);
 
     fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
 
@@ -215,9 +341,8 @@ describe("AccountMenu", () => {
   });
 
   it("lets the user back out of the disconnect confirmation", async () => {
-    const backend = installBackend({ playlist_code_configured: true });
-    renderMenu();
-    await openMenu();
+    const { backend, queryClient } = renderMenu({ playlist_code_configured: true });
+    await openMenu(queryClient);
 
     fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
@@ -234,16 +359,25 @@ describe("AccountMenu", () => {
       "fetch",
       vi.fn(() => new Promise<Response>(() => {})),
     );
-    renderMenu();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountMenu />
+      </QueryClientProvider>,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
     await screen.findByRole("menu");
+    // Guarantee the read really is pending before measuring the absences.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(1));
 
     // Positive: an honest loading state.
     expect(screen.getByText(/checking the active source/i)).toBeInTheDocument();
     // Negative: the false capability claim is not made while the answer is unknown.
     expect(screen.queryByText(/no account needed/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole("menuitem", { name: /connect playlist code/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /login to adobotv/i })).not.toBeInTheDocument();
   });
 
   // A failed status read is also not "no account needed": the menu must say it
@@ -255,7 +389,14 @@ describe("AccountMenu", () => {
         throw new TypeError("Failed to fetch");
       }),
     );
-    renderMenu();
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
+    });
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AccountMenu />
+      </QueryClientProvider>,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
     await screen.findByRole("menu");
@@ -265,9 +406,11 @@ describe("AccountMenu", () => {
   });
 
   it("says so when a disconnect fails, instead of silently staying connected", async () => {
-    const backend = installBackend({ playlist_code_configured: true, deleteStatus: 500 });
-    renderMenu();
-    await openMenu();
+    const { backend, queryClient } = renderMenu({
+      playlist_code_configured: true,
+      deleteStatus: 500,
+    });
+    await openMenu(queryClient);
 
     fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /yes, disconnect/i }));
@@ -281,9 +424,8 @@ describe("AccountMenu", () => {
   });
 
   it("moves focus into the disconnect confirmation and back on cancel", async () => {
-    installBackend({ playlist_code_configured: true });
-    renderMenu();
-    await openMenu();
+    const { queryClient } = renderMenu({ playlist_code_configured: true });
+    await openMenu(queryClient);
 
     fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
     expect(screen.getByRole("menuitem", { name: /yes, disconnect/i })).toHaveFocus();
@@ -293,11 +435,10 @@ describe("AccountMenu", () => {
   });
 
   it("returns focus to the avatar when the modal closes", async () => {
-    installBackend({ playlist_code_configured: false });
-    renderMenu();
-    const button = await openMenu();
+    const { queryClient } = renderMenu({ playlist_code_configured: false });
+    const button = await openMenu(queryClient);
 
-    fireEvent.click(screen.getByRole("menuitem", { name: /connect playlist code/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /login to adobotv/i }));
     fireEvent.click(await screen.findByRole("button", { name: /close/i }));
 
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());

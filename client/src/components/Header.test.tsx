@@ -22,8 +22,30 @@ function installBackend() {
       if (String(input).endsWith("/api/v1/source/status")) {
         return makeResponse(200, {
           source: "adobotv-http",
+          active: true,
+          origin: "stored",
+          dev: false,
           needs_playlist_code: true,
           playlist_code_configured: true,
+          playlist_file_configured: false,
+          modes: [
+            {
+              name: "adobotv-http",
+              selectable: true,
+              dev: false,
+              active: true,
+              configured: true,
+              needs_playlist_code: true,
+            },
+            {
+              name: "file",
+              selectable: true,
+              dev: false,
+              active: false,
+              configured: false,
+              needs_playlist_code: false,
+            },
+          ],
         });
       }
       throw new Error(`unexpected fetch: ${String(input)}`);
@@ -65,9 +87,11 @@ describe("Header account control", () => {
     expect(container.innerHTML).not.toContain("Aether Voyager");
     expect(container.innerHTML).not.toContain("Diamond Elite Premium");
 
-    // And it surfaces real state, not a fabricated tier: the active source.
+    // And it surfaces real state, not a fabricated tier: the active source, in
+    // our words rather than the adapter's.
     fireEvent.click(button);
-    expect(await screen.findByText("adobotv-http")).toBeInTheDocument();
+    expect(await screen.findByText("AdoboTV account")).toBeInTheDocument();
     expect(screen.getByText("Playlist code connected")).toBeInTheDocument();
+    expect(screen.queryByText("adobotv-http")).not.toBeInTheDocument();
   });
 });

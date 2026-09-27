@@ -26,6 +26,9 @@ interface FetchCall {
 interface Backend {
   needs: boolean;
   configured: boolean;
+  // Whether any source is configured. False is the first-run state, where the
+  // gate must render the chooser rather than a strip above an empty library.
+  active: boolean;
   // The reply POST /source/playlist-code gives.
   post: { status: number; body: { error?: string; code?: string } };
 }
@@ -51,15 +54,40 @@ function installBackend(init: Partial<Backend> = {}) {
   const backend: Backend = {
     needs: true,
     configured: false,
+    active: true,
     post: { status: 200, body: {} },
     ...init,
   };
   const calls: FetchCall[] = [];
 
+  // The full status contract the server reports: the two selectable modes are
+  // offered from these flags, never from their names.
   const statusBody = () => ({
-    source: "adobotv-http",
+    source: backend.active ? "adobotv-http" : "",
+    active: backend.active,
+    origin: backend.active ? "stored" : "none",
+    dev: false,
     needs_playlist_code: backend.needs,
     playlist_code_configured: backend.configured,
+    playlist_file_configured: false,
+    modes: [
+      {
+        name: "adobotv-http",
+        selectable: true,
+        dev: false,
+        active: backend.active,
+        configured: backend.configured,
+        needs_playlist_code: true,
+      },
+      {
+        name: "file",
+        selectable: true,
+        dev: false,
+        active: false,
+        configured: false,
+        needs_playlist_code: false,
+      },
+    ],
   });
 
   vi.stubGlobal(
@@ -180,6 +208,92 @@ describe("PlaylistCodeGate — entry", () => {
     // once it says configured, server truth wins and the gate goes quiet.
     await waitFor(() => expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument());
     expect(container.firstChild).toBeNull();
+  });
+});
+
+describe("PlaylistCodeGate — first-run chooser", () => {
+  it("renders both connection choices as primary content when no source is active", async () => {
+    installBackend({ active: false, needs: false });
+    renderGate();
+
+    // Positive: the chooser heading and both derived options.
+    expect(await screen.findByRole("heading", { name: /choose how to connect/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /login to adobotv/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /import local playlist/i })).toBeInTheDocument();
+    // Negative: the chooser is the content, so no code form is forced on the
+    // user before they pick the login path.
+    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+  });
+
+  it("opens the code form from Login to AdoboTV, with a way back to the chooser", async () => {
+    installBackend({ active: false, needs: false });
+    renderGate();
+
+    fireEvent.click(await screen.findByRole("button", { name: /login to adobotv/i }));
+    expect(screen.getByLabelText("Playlist code")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /back/i }));
+    expect(
+      await screen.findByRole("heading", { name: /choose how to connect/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+  });
+
+  it("opens the import modal from Import Local Playlist", async () => {
+    installBackend({ active: false, needs: false });
+    renderGate();
+
+    fireEvent.click(await screen.findByRole("button", { name: /import local playlist/i }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByLabelText("Playlist file")).toBeInTheDocument();
+  });
+
+  // Paired with the chooser case above: once a source is active the chooser is
+  // gone. The code form's presence is the positive guarantee that the status
+  // resolved and the active source is really being measured.
+  it("renders no chooser once a source is active", async () => {
+    installBackend({ active: true, needs: true, configured: false });
+    renderGate();
+
+    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /choose how to connect/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /login to adobotv/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /import local playlist/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a failed status read as an error with Retry, never a chooser", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    renderGate();
+
+    // Positive: the failure is reported with a retry action.
+    expect(await screen.findByRole("heading", { name: "Cannot reach AdoboFlix" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reload/i })).toBeInTheDocument();
+    // Negative: no chooser built on the absent data.
+    expect(screen.queryByRole("heading", { name: /choose how to connect/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /login to adobotv/i })).not.toBeInTheDocument();
+  });
+
+  it("renders nothing, not a chooser, while the status is still pending", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    const { container, queryClient } = renderGate();
+
+    // Guarantee the state being measured has arrived: the status read is
+    // genuinely in flight and unresolved, so the emptiness below is "pending",
+    // not "resolved to nothing".
+    await waitFor(() => expect(queryClient.isFetching()).toBe(1));
+    expect(queryClient.getQueryData(SOURCE_STATUS_QUERY_KEY)).toBeUndefined();
+
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByRole("heading", { name: /choose how to connect/i })).not.toBeInTheDocument();
   });
 });
 
@@ -329,8 +443,30 @@ describe("PlaylistCodeGate — failed outcomes", () => {
         if (String(input).endsWith(STATUS_URL)) {
           return makeResponse(200, {
             source: "adobotv-http",
+            active: true,
+            origin: "stored",
+            dev: false,
             needs_playlist_code: true,
             playlist_code_configured: false,
+            playlist_file_configured: false,
+            modes: [
+              {
+                name: "adobotv-http",
+                selectable: true,
+                dev: false,
+                active: true,
+                configured: false,
+                needs_playlist_code: true,
+              },
+              {
+                name: "file",
+                selectable: true,
+                dev: false,
+                active: false,
+                configured: false,
+                needs_playlist_code: false,
+              },
+            ],
           });
         }
         throw new TypeError("Failed to fetch");
