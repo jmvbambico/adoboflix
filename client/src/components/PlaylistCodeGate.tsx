@@ -5,13 +5,9 @@
 
 import { useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { CircleCheck, KeyRound, LoaderCircle, RefreshCw, Trash2 } from "lucide-react";
+import { KeyRound, LoaderCircle, RefreshCw } from "lucide-react";
 import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
 import { savedReassurance, usePlaylistCodeController } from "./playlistCode";
-
-// Re-exported for callers that key off the status query without importing the
-// controller module directly.
-export { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
 
 interface PlaylistCodeGateProps {
   // Errors from requests the caller already issued. Any carrying
@@ -26,10 +22,16 @@ interface PlaylistCodeGateProps {
 // touches browser storage: the code lives on the server, and the input is
 // cleared the moment it is submitted. The submit/gate-code handling lives in
 // usePlaylistCodeController, shared with the account menu's modal.
+//
+// It renders only when there is something to do — enter a code, or report a
+// connect outcome. A happily-configured source renders nothing: the account
+// menu owns disconnecting, with its own confirmation, so a permanent panel
+// above the content would be redundant chrome (and a second route to the same
+// destructive action) for someone with nothing to fix.
 export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps) {
   const queryClient = useQueryClient();
   const [code, setCode] = useState("");
-  const { statusQuery, submit, clear, submitCode, outcome } = usePlaylistCodeController();
+  const { statusQuery, submit, submitCode, outcome } = usePlaylistCodeController();
 
   const needsCode = Boolean(statusQuery.data?.needs_playlist_code);
   const configured = Boolean(statusQuery.data?.playlist_code_configured);
@@ -43,9 +45,10 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
   // keep forcing the form just because a request once failed or an old error
   // still asks for a code.
   const showForm = !saved && !configured && (needsCode || requestNeedsEntry || failed !== null);
-  const showConfigured = !saved && !showForm && needsCode && configured;
 
-  if (!saved && !showForm && !showConfigured) return null;
+  // Nothing to do and nothing to report: cover the connected happy path with no
+  // chrome at all.
+  if (!saved && !showForm) return null;
 
   const handleSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -77,16 +80,6 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
               </p>
               <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
                 {outcome.copy.message}
-              </p>
-            </>
-          ) : showConfigured ? (
-            <>
-              <h4 className="font-display font-bold text-sm text-slate-100 tracking-wide">
-                Playlist code configured
-              </h4>
-              <p className="text-xs text-slate-400 leading-relaxed max-w-2xl">
-                This player is connected to AdoboTV with a playlist code held on the server. Clear
-                it to disconnect, or to fall back to the environment configuration.
               </p>
             </>
           ) : (
@@ -144,24 +137,6 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
           <RefreshCw className="w-3.5 h-3.5" />
           Check again
         </button>
-      )}
-
-      {showConfigured && (
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-[11px] font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full flex items-center gap-1.5">
-            <CircleCheck className="w-3.5 h-3.5" />
-            {statusQuery.data?.source ?? "source"} ready
-          </span>
-          <button
-            type="button"
-            onClick={() => clear.mutate()}
-            disabled={clear.isPending}
-            className="px-3 py-1.5 rounded-lg border border-white/10 text-slate-300 hover:text-red-300 hover:border-red-500/30 hover:bg-red-500/10 text-[11px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer focus:outline-none disabled:opacity-50"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            {clear.isPending ? "Clearing…" : "Clear playlist code"}
-          </button>
-        </div>
       )}
     </section>
   );
