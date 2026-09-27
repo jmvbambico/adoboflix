@@ -29,12 +29,20 @@ describe("describeSourceError — mapped codes", () => {
     expect(copy).toMatchObject({ code, severity, title });
   });
 
+  // Every mapped code is required to carry all four fields, so presence is
+  // asserted before content: an explicit type check for each, then a content
+  // check that substitutes "" for a missing value. Without the type checks a
+  // field that is absent — `undefined?.trim()` — passes a bare `not.toBe("")`.
   it.each(MAPPED)("gives every mapped code full, user-facing copy for $code", ({ code }) => {
     const copy = describeSourceError(new ApiError("x", 500, code));
+    expect(typeof copy.title).toBe("string");
+    expect(typeof copy.message).toBe("string");
+    expect(typeof copy.hint).toBe("string");
+    expect(typeof copy.retryLabel).toBe("string");
     expect(copy.title.trim()).not.toBe("");
     expect(copy.message.trim()).not.toBe("");
-    expect(copy.hint?.trim()).not.toBe("");
-    expect(copy.retryLabel?.trim()).not.toBe("");
+    expect((copy.hint ?? "").trim()).not.toBe("");
+    expect((copy.retryLabel ?? "").trim()).not.toBe("");
   });
 
   it("can produce every severity the type allows", () => {

@@ -32,11 +32,15 @@ describe("SourceStatusPanel", () => {
   });
 
   it("shows the unreachable copy, with no code chip, for a non-ApiError", () => {
-    render(<SourceStatusPanel error={new Error("ECONNREFUSED")} />);
+    const { container } = render(<SourceStatusPanel error={new Error("ECONNREFUSED")} />);
 
     expect(screen.getByRole("heading", { name: "Cannot reach AdoboFlix" })).toBeInTheDocument();
     expect(screen.getByText(/could not reach its own backend/)).toBeInTheDocument();
-    expect(screen.queryByText("device_pending")).not.toBeInTheDocument();
+    // The code chip is the only <span> the panel ever renders, and it renders
+    // only when the copy carries a code. Query it structurally: the chip has
+    // no role or test id. Asserting on the literal "device_pending" from the
+    // previous case would pass even if this error rendered its own chip.
+    expect(container.querySelector("span")).toBeNull();
   });
 
   it("never renders the raw error message", () => {
