@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { KeyRound, LoaderCircle, X } from "lucide-react";
 import { sourceStatusCopy } from "./sourceStatus";
 import { savedReassurance, usePlaylistCodeController } from "./playlistCode";
@@ -23,14 +23,36 @@ interface PlaylistCodeModalProps {
 export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeModalProps) {
   const [code, setCode] = useState("");
   const { submit, submitCode, outcome } = usePlaylistCodeController();
+  const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
+
+  // aria-modal="true" promises the rest of the page is inert, so Tab must cycle
+  // within the dialog instead of walking into the content behind the backdrop.
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "Tab") return;
+    const focusables = Array.from(
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ) ?? [],
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const saved = outcome?.kind === "saved";
   const failed = outcome?.kind === "failed" ? outcome.copy : null;
@@ -55,9 +77,11 @@ export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeM
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="playlist-code-modal-title"
+        onKeyDown={handleDialogKeyDown}
         className="w-full max-w-md glass-panel rounded-2xl border border-white/10 p-5 sm:p-6 flex flex-col gap-4"
       >
         <div className="flex items-start justify-between gap-4">

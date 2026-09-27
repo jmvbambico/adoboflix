@@ -31,15 +31,21 @@ interface StatusShape {
 const STATUS_URL = "/api/v1/source/status";
 const CODE_URL = "/api/v1/source/playlist-code";
 
+interface BackendOptions extends Partial<StatusShape> {
+  // The status the DELETE returns. >= 300 simulates a failed disconnect.
+  deleteStatus?: number;
+}
+
 // installBackend serves the status endpoint and the DELETE that disconnects.
 // It records every call so a test can assert the destructive request was not
 // made until the user confirmed.
-function installBackend(init: Partial<StatusShape> = {}) {
+function installBackend(init: BackendOptions = {}) {
+  const { deleteStatus = 200, ...statusInit } = init;
   const status: StatusShape = {
     source: "adobotv-http",
     needs_playlist_code: true,
     playlist_code_configured: false,
-    ...init,
+    ...statusInit,
   };
   const calls: FetchCall[] = [];
 
@@ -52,6 +58,9 @@ function installBackend(init: Partial<StatusShape> = {}) {
 
       if (url.endsWith(STATUS_URL)) return makeResponse(200, status);
       if (url.endsWith(CODE_URL) && method === "DELETE") {
+        if (deleteStatus >= 300) {
+          return makeResponse(deleteStatus, { error: "could not clear", code: "internal_error" });
+        }
         status.playlist_code_configured = false;
         return makeResponse(200, status);
       }
@@ -198,5 +207,83 @@ describe("AccountMenu", () => {
 
     expect(screen.queryByText(/type it in again in full/i)).not.toBeInTheDocument();
     expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
+  });
+
+  // While the status query is still in flight we do not know whether the source
+  // takes a code. Claiming "no account needed" here is a falsehood about the
+  // source's capability, so the menu must say it is still checking.
+  it("does not claim the source needs no account while status is loading", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => new Promise<Response>(() => {})),
+    );
+    renderMenu();
+
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await screen.findByRole("menu");
+
+    // Positive: an honest loading state.
+    expect(screen.getByText(/checking the active source/i)).toBeInTheDocument();
+    // Negative: the false capability claim is not made while the answer is unknown.
+    expect(screen.queryByText(/no account needed/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: /connect playlist code/i })).not.toBeInTheDocument();
+  });
+
+  // A failed status read is also not "no account needed": the menu must say it
+  // could not read the status rather than inventing a capability.
+  it("does not claim the source needs no account when status cannot be read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    renderMenu();
+
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await screen.findByRole("menu");
+
+    expect(await screen.findByText(/can't read the source status/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no account needed/i)).not.toBeInTheDocument();
+  });
+
+  it("says so when a disconnect fails, instead of silently staying connected", async () => {
+    const backend = installBackend({ playlist_code_configured: true, deleteStatus: 500 });
+    renderMenu();
+    await openMenu();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /yes, disconnect/i }));
+
+    // Positive: the failure is reported.
+    expect(await screen.findByRole("alert")).toHaveTextContent(/could not complete this request/i);
+    // Negative: it did not falsely report a disconnect.
+    expect(screen.getByText("Playlist code connected")).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /disconnect/i })).toBeInTheDocument();
+    expect(backend.calls.some((c) => c.method === "DELETE")).toBe(true);
+  });
+
+  it("moves focus into the disconnect confirmation and back on cancel", async () => {
+    installBackend({ playlist_code_configured: true });
+    renderMenu();
+    await openMenu();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
+    expect(screen.getByRole("menuitem", { name: /yes, disconnect/i })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
+    expect(screen.getByRole("menuitem", { name: /^disconnect$/i })).toHaveFocus();
+  });
+
+  it("returns focus to the avatar when the modal closes", async () => {
+    installBackend({ playlist_code_configured: false });
+    renderMenu();
+    const button = await openMenu();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: /connect playlist code/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /close/i }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(button).toHaveFocus();
   });
 });

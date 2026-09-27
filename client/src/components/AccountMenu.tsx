@@ -4,7 +4,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { KeyRound, LogOut, User } from "lucide-react";
+import { KeyRound, LogOut, RefreshCw, User } from "lucide-react";
+import { describeSourceError } from "./sourceStatus";
 import { usePlaylistCodeController } from "./playlistCode";
 import PlaylistCodeModal from "./PlaylistCodeModal";
 
@@ -29,11 +30,21 @@ export default function AccountMenu() {
 
   const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const confirmYesRef = useRef<HTMLButtonElement>(null);
+  const disconnectRef = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
 
   const { statusQuery, clear } = usePlaylistCodeController();
   const status = statusQuery.data;
   const needsCode = Boolean(status?.needs_playlist_code);
   const configured = Boolean(status?.playlist_code_configured);
+  // Loading and failure are NOT "this source has no account concept". Until an
+  // answer arrives we know nothing about whether a code is needed, so the menu
+  // must not assert one.
+  const statusResolved = status !== undefined;
+  const statusFailed = statusQuery.isError && !statusResolved;
+
+  const disconnectError = clear.isError ? describeSourceError(clear.error) : null;
 
   const closeMenu = useCallback((refocus: boolean) => {
     setOpen(false);
@@ -66,8 +77,25 @@ export default function AccountMenu() {
     };
   }, [open, closeMenu]);
 
+  // Opening the disconnect confirmation unmounts the focused Disconnect button,
+  // so focus must be moved into the confirmation; cancelling must move it back.
+  // Without this, focus lands on <body> and the roving-focus arithmetic below
+  // sees index -1.
+  useEffect(() => {
+    if (confirmingDisconnect) {
+      confirmYesRef.current?.focus();
+    } else if (wasConfirming.current) {
+      const target =
+        disconnectRef.current ?? menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]');
+      target?.focus();
+    }
+    wasConfirming.current = confirmingDisconnect;
+  }, [confirmingDisconnect]);
+
   // Roving focus across the menu's actions, so role="menu" behaves as the role
-  // promises for a keyboard user.
+  // promises for a keyboard user. An index of -1 (focus outside the items) is
+  // treated as "start from an end" rather than arithmetically landing on the
+  // second-to-last item.
   const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const items = Array.from(
       menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [],
@@ -76,10 +104,10 @@ export default function AccountMenu() {
     const index = items.indexOf(document.activeElement as HTMLElement);
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      items[(index + 1 + items.length) % items.length]?.focus();
+      items[index === -1 ? 0 : (index + 1) % items.length]?.focus();
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
-      items[(index - 1 + items.length) % items.length]?.focus();
+      items[index === -1 ? items.length - 1 : (index - 1 + items.length) % items.length]?.focus();
     } else if (event.key === "Home") {
       event.preventDefault();
       items[0]?.focus();
@@ -94,7 +122,12 @@ export default function AccountMenu() {
     closeMenu(false);
   };
 
-  const closeModal = useCallback(() => setModalOpen(false), []);
+  // Return focus to the avatar when the modal closes, so it does not fall to
+  // <body> as the focused input unmounts.
+  const closeModal = useCallback(() => {
+    setModalOpen(false);
+    buttonRef.current?.focus();
+  }, []);
 
   return (
     <div className="relative">
@@ -103,7 +136,7 @@ export default function AccountMenu() {
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        aria-controls="account-menu"
+        aria-controls={open ? "account-menu" : undefined}
         aria-label="Account menu"
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={(event) => {
@@ -132,8 +165,20 @@ export default function AccountMenu() {
             <span className="text-[10px] font-mono uppercase tracking-widest text-slate-500">
               Active source
             </span>
-            <span className="text-sm font-semibold text-slate-100">{status?.source ?? "—"}</span>
-            {needsCode ? (
+            <span className="text-sm font-semibold text-slate-100">
+              {status?.source ?? (statusFailed ? "—" : "…")}
+            </span>
+            {!statusResolved ? (
+              statusFailed ? (
+                <span className="text-[11px] leading-relaxed text-red-300">
+                  Can't read the source status.
+                </span>
+              ) : (
+                <span className="text-[11px] leading-relaxed text-slate-400">
+                  Checking the active source…
+                </span>
+              )
+            ) : needsCode ? (
               <span
                 className={`text-[11px] font-medium ${
                   configured ? "text-emerald-400" : "text-amber-300"
@@ -146,17 +191,34 @@ export default function AccountMenu() {
                 No account needed — this source reads a local file or the database directly.
               </span>
             )}
-            {status?.subscription_expires_at && (
+            {statusResolved && status?.subscription_expires_at && (
               <span className="text-[11px] text-slate-300">
                 Subscription renews {formatExpiry(status.subscription_expires_at)}
               </span>
             )}
-            {status?.user_message && (
+            {statusResolved && status?.user_message && (
               <span className="text-[11px] leading-relaxed text-slate-300">{status.user_message}</span>
             )}
           </div>
 
-          {needsCode && (
+          {statusFailed && (
+            <>
+              <div className="h-px bg-white/5" role="none" />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  void statusQuery.refetch();
+                }}
+                className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                Retry
+              </button>
+            </>
+          )}
+
+          {statusResolved && needsCode && (
             <>
               <div className="h-px bg-white/5" role="none" />
 
@@ -167,6 +229,7 @@ export default function AccountMenu() {
                     type it in again in full.
                   </p>
                   <button
+                    ref={confirmYesRef}
                     type="button"
                     role="menuitem"
                     onClick={() => {
@@ -200,6 +263,7 @@ export default function AccountMenu() {
                   </button>
                   {configured && (
                     <button
+                      ref={disconnectRef}
                       type="button"
                       role="menuitem"
                       onClick={() => setConfirmingDisconnect(true)}
@@ -208,6 +272,11 @@ export default function AccountMenu() {
                       <LogOut className="w-3.5 h-3.5" />
                       Disconnect
                     </button>
+                  )}
+                  {disconnectError && (
+                    <p role="alert" className="px-1 text-[11px] leading-relaxed text-red-300">
+                      {disconnectError.message}
+                    </p>
                   )}
                 </>
               )}

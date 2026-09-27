@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
+import type { SourceStatus } from "../api/client";
 import PlaylistCodeModal from "./PlaylistCodeModal";
+import { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
 
 function makeResponse(status: number, body: unknown): Response {
   const text = body === undefined ? "" : JSON.stringify(body);
@@ -57,15 +59,24 @@ function installBackend(init: Partial<Backend> = {}) {
   return { backend, calls };
 }
 
-function renderModal(props: { configured: boolean; onClose: () => void }) {
-  const queryClient = new QueryClient({
+function makeQueryClient() {
+  return new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
   });
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <PlaylistCodeModal {...props} />
-    </QueryClientProvider>,
-  );
+}
+
+function renderModal(
+  props: { configured: boolean; onClose: () => void },
+  queryClient: QueryClient = makeQueryClient(),
+) {
+  return {
+    queryClient,
+    ...render(
+      <QueryClientProvider client={queryClient}>
+        <PlaylistCodeModal {...props} />
+      </QueryClientProvider>,
+    ),
+  };
 }
 
 async function submit(code: string, buttonName: RegExp) {
@@ -131,5 +142,46 @@ describe("PlaylistCodeModal", () => {
     fireEvent.keyDown(document, { key: "Escape" });
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  // Pins the hook-level onSuccess the gate depends on, not just the modal's own
+  // close: the optimistic status-cache write and the query invalidation must
+  // still fire now that submitCode also passes a mutate-level onSuccess.
+  it("fires the hook-level onSuccess: optimistic status cache and invalidation", async () => {
+    installBackend();
+    const queryClient = makeQueryClient();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    let snapshot: SourceStatus | undefined;
+    const onClose = vi.fn(() => {
+      // Captured the instant the connect completes, before the invalidated
+      // refetch can resolve, so this reads the optimistic write itself.
+      snapshot = queryClient.getQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY);
+    });
+
+    renderModal({ configured: false, onClose }, queryClient);
+    await submit(SECRET, /^connect$/i);
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(invalidate).toHaveBeenCalled();
+    expect(snapshot?.playlist_code_configured).toBe(true);
+  });
+
+  it("traps Tab within the dialog", async () => {
+    installBackend();
+    renderModal({ configured: false, onClose: vi.fn() });
+
+    const close = screen.getByRole("button", { name: /close/i });
+    const input = screen.getByLabelText("Playlist code");
+
+    // Shift+Tab from the first focusable wraps to the last.
+    close.focus();
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(input).toHaveFocus();
+
+    // Tab from the last focusable wraps to the first.
+    input.focus();
+    fireEvent.keyDown(input, { key: "Tab" });
+    expect(close).toHaveFocus();
   });
 });
