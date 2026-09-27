@@ -368,8 +368,16 @@ func (h *PlayerHandler) ResolveEpisode(c *gin.Context) {
 func (h *PlayerHandler) ProxyStream(c *gin.Context) {
 	targetURL := c.Query("url")
 	source := c.DefaultQuery("source", "vidzee")
-	ref := c.DefaultQuery("ref", "https://www.google.com")
-	ua := c.DefaultQuery("ua", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	ref := c.Query("ref")
+	// The proxy speaks for the browser that asked for it. When the stream
+	// configures no UA of its own, forward the caller's own User-Agent rather
+	// than inventing one; a fabricated UA reads as malformed to origins that
+	// filter on it (A2Z/ZTE JITP DRM 403s the old default). If the caller
+	// carries none either, send none — never a made-up string.
+	ua := c.Query("ua")
+	if ua == "" {
+		ua = c.GetHeader("User-Agent")
+	}
 
 	if targetURL == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing url"})
@@ -386,10 +394,15 @@ func (h *PlayerHandler) ProxyStream(c *gin.Context) {
 		return
 	}
 
-	// Build headers based on source
+	// Build headers based on source. User-Agent is always set — an empty value
+	// suppresses net/http's own default UA, so a caller with no UA sends none.
+	// Referer is sent only when actually configured; the per-provider cases
+	// below are deliberate requirements, not defaults.
 	headers := map[string]string{
 		"User-Agent": ua,
-		"Referer":    ref,
+	}
+	if ref != "" {
+		headers["Referer"] = ref
 	}
 	switch source {
 	case "vidstreaming":
@@ -514,7 +527,8 @@ func (h *PlayerHandler) ResolveChannelStream(c *gin.Context) {
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	proxyURL := h.buildProxyURL(scheme, c.Request.Host, stream.URL, stream.SourceType, "", "")
+	proxyURL := h.buildProxyURL(scheme, c.Request.Host, stream.URL, stream.SourceType,
+		derefString(stream.UserAgent), derefString(stream.Referer))
 
 	drmType := ""
 	if stream.DrmType != nil {
