@@ -25,22 +25,32 @@ interface FetchCall {
 interface Backend {
   needs: boolean;
   configured: boolean;
-  // The reply POST /source/playlist-code gives. On a 2xx the code is treated as
-  // saved, matching the server.
-  post: { status: number; body: unknown };
+  // The reply POST /source/playlist-code gives.
+  post: { status: number; body: { error?: string; code?: string } };
 }
 
 const STATUS_URL = "/api/v1/source/status";
 const CODE_URL = "/api/v1/source/playlist-code";
 
+// The codes the server keeps the submitted code for, mirroring
+// playlistCodeProvenValid. The mock persists on these (and on any 2xx) so a
+// remount sees the same server state the real backend would report.
+const SAVED_CODES = [
+  "device_pending",
+  "subscription_inactive",
+  "playlist_format_m3u",
+  "content_token_rejected",
+  "content_not_found",
+] as const;
+
+// Codes for which nothing is persisted and the user must correct the code.
+const FAILED_CODES = ["playlist_rejected", "upstream_error", "malformed_playlist"] as const;
+
 function installBackend(init: Partial<Backend> = {}) {
   const backend: Backend = {
     needs: true,
     configured: false,
-    post: {
-      status: 200,
-      body: { source: "adobotv-http", needs_playlist_code: true, playlist_code_configured: true },
-    },
+    post: { status: 200, body: {} },
     ...init,
   };
   const calls: FetchCall[] = [];
@@ -63,7 +73,10 @@ function installBackend(init: Partial<Backend> = {}) {
       if (url.endsWith(CODE_URL)) {
         if (method === "POST") {
           const { status, body: reply } = backend.post;
-          if (status >= 200 && status < 300) backend.configured = true;
+          const code = reply.code;
+          if (status < 300 || (code !== undefined && (SAVED_CODES as readonly string[]).includes(code))) {
+            backend.configured = true;
+          }
           return makeResponse(status, reply);
         }
         if (method === "DELETE") {
@@ -78,16 +91,26 @@ function installBackend(init: Partial<Backend> = {}) {
   return { backend, calls };
 }
 
+// A long staleTime, like the app's own client, so a remounted query reuses the
+// cached answer rather than silently refetching. That is what exposes a status
+// cache left stale by a saved connect.
+function makeQueryClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
+  });
+}
+
+function renderGateWith(queryClient: QueryClient, errors?: unknown[]) {
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <PlaylistCodeGate errors={errors} />
+    </QueryClientProvider>,
+  );
+}
+
 function renderGate(errors?: unknown[]) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return {
-    queryClient,
-    ...render(
-      <QueryClientProvider client={queryClient}>
-        <PlaylistCodeGate errors={errors} />
-      </QueryClientProvider>,
-    ),
-  };
+  const queryClient = makeQueryClient();
+  return { queryClient, ...renderGateWith(queryClient, errors) };
 }
 
 const SECRET = "SUPER-SECRET-PLAYLIST-CODE";
@@ -122,21 +145,26 @@ describe("PlaylistCodeGate — entry", () => {
     const { container } = renderGate();
 
     await waitFor(() =>
-      expect(
-        screen.queryByRole("heading", { name: /playlist code/i }),
-      ).not.toBeInTheDocument(),
+      expect(screen.queryByRole("heading", { name: /playlist code/i })).not.toBeInTheDocument(),
     );
     expect(container.firstChild).toBeNull();
   });
 
-  it("shows the form when a request fails with playlist_code_required even if status says configured", async () => {
+  it("still opens the entry form for a required error when no code is configured", async () => {
+    installBackend({ configured: false });
+    renderGate([new ApiError("needs a code", 403, "playlist_code_required")]);
+
+    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+  });
+
+  it("defers to server truth: a configured status suppresses the form even for a required error", async () => {
     installBackend({ configured: true });
     renderGate([new ApiError("needs a code", 403, "playlist_code_required")]);
 
-    // Positive: the error signal opens the entry path.
-    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
-    // Negative: the configured-state control gives way to the form.
-    expect(screen.queryByRole("button", { name: /clear playlist code/i })).not.toBeInTheDocument();
+    // Positive: the configured state wins.
+    expect(await screen.findByRole("button", { name: /clear playlist code/i })).toBeInTheDocument();
+    // Negative: an old error does not force a redundant re-entry.
+    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
   });
 });
 
@@ -178,8 +206,20 @@ describe("PlaylistCodeGate — submission", () => {
   });
 });
 
-describe("PlaylistCodeGate — outcomes", () => {
-  it("treats device_pending as saved and does not ask the user to re-enter", async () => {
+describe("PlaylistCodeGate — saved outcomes", () => {
+  it.each(SAVED_CODES)("treats %s as a saved code and hides the form", async (code) => {
+    installBackend({ post: { status: 403, body: { error: "gate", code } } });
+    renderGate();
+
+    await submitCode(SECRET);
+
+    // Positive: the saved reassurance is shown.
+    expect(await screen.findByRole("heading", { name: /playlist code saved/i })).toBeInTheDocument();
+    // Negative: nothing to re-enter, so no form.
+    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+  });
+
+  it("explains a device_pending save and does not ask the user to re-enter", async () => {
     installBackend({
       post: { status: 403, body: { error: "device pending", code: "device_pending" } },
     });
@@ -187,17 +227,15 @@ describe("PlaylistCodeGate — outcomes", () => {
 
     await submitCode(SECRET);
 
-    // Positive: the saved reassurance is shown, naming the approval gate.
     expect(await screen.findByRole("heading", { name: /playlist code saved/i })).toBeInTheDocument();
     expect(screen.getByText(/nothing needs re-entering/i)).toBeInTheDocument();
     expect(screen.getByText(/once the AdoboTV operator approves this device/i)).toBeInTheDocument();
-    // Negative: no entry form, and no rejection copy.
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
     expect(screen.queryByText("Playlist code was rejected")).not.toBeInTheDocument();
     expect(container.innerHTML).not.toContain(SECRET);
   });
 
-  it("treats subscription_inactive as saved too", async () => {
+  it("explains a subscription_inactive save in its own terms", async () => {
     installBackend({
       post: {
         status: 403,
@@ -213,19 +251,41 @@ describe("PlaylistCodeGate — outcomes", () => {
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
   });
 
-  it("treats a persisted non-device gate (m3u format) as saved, mirroring the server", async () => {
+  it("does not ask for the code again after a remount, because the status cache was updated", async () => {
     installBackend({
-      post: { status: 502, body: { error: "output format m3u", code: "playlist_format_m3u" } },
+      post: { status: 403, body: { error: "device pending", code: "device_pending" } },
     });
+    const queryClient = makeQueryClient();
+    const first = renderGateWith(queryClient);
+
+    await submitCode(SECRET);
+    await screen.findByRole("heading", { name: /playlist code saved/i });
+    first.unmount();
+
+    renderGateWith(queryClient);
+
+    // Negative: an ordinary remount must not resurrect the entry form for a
+    // code the server already saved.
+    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+    // Positive: the configured state is what shows instead.
+    expect(screen.getByRole("heading", { name: /playlist code configured/i })).toBeInTheDocument();
+  });
+});
+
+describe("PlaylistCodeGate — failed outcomes", () => {
+  it.each(FAILED_CODES)("treats %s as not saved and keeps the form", async (code) => {
+    installBackend({ post: { status: 403, body: { error: "no", code } } });
     renderGate();
 
     await submitCode(SECRET);
 
-    expect(await screen.findByRole("heading", { name: /playlist code saved/i })).toBeInTheDocument();
-    expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
+    // Positive: the form is still offered so the code can be corrected.
+    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+    // Negative: nothing was persisted, so the saved reassurance is absent.
+    expect(screen.queryByRole("heading", { name: /playlist code saved/i })).not.toBeInTheDocument();
   });
 
-  it("renders the retry copy for playlist_rejected and keeps the form", async () => {
+  it("renders the retry copy for playlist_rejected", async () => {
     installBackend({
       post: { status: 403, body: { error: "playlist code rejected", code: "playlist_rejected" } },
     });
@@ -233,19 +293,16 @@ describe("PlaylistCodeGate — outcomes", () => {
 
     await submitCode(SECRET);
 
-    // Positive: the mapped rejection copy, and the form is still offered.
     expect(await screen.findByRole("heading", { name: "Playlist code was rejected" })).toBeInTheDocument();
     expect(screen.getByText(/Check the configured playlist code, then try again/i)).toBeInTheDocument();
     expect(screen.getByLabelText("Playlist code")).toBeInTheDocument();
-    // Negative: nothing was persisted, so the saved reassurance is absent.
-    expect(screen.queryByText(/nothing needs re-entering/i)).not.toBeInTheDocument();
   });
 
   it("shows the unreachable copy for a transport failure", async () => {
     installBackend();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      vi.fn(async (input: RequestInfo | URL) => {
         if (String(input).endsWith(STATUS_URL)) {
           return makeResponse(200, {
             source: "adobotv-http",
@@ -253,7 +310,6 @@ describe("PlaylistCodeGate — outcomes", () => {
             playlist_code_configured: false,
           });
         }
-        void init;
         throw new TypeError("Failed to fetch");
       }),
     );

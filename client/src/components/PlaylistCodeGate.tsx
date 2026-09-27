@@ -71,7 +71,6 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
 
   const needsCode = Boolean(statusQuery.data?.needs_playlist_code);
   const configured = Boolean(statusQuery.data?.playlist_code_configured);
-  const statusNeedsEntry = needsCode && !configured;
   const requestNeedsEntry = errors.some(
     (error) => describeSourceError(error).code === "playlist_code_required",
   );
@@ -92,6 +91,15 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
       // A gate that proves the code valid leaves it persisted; the rest persist
       // nothing and the user must correct the code.
       if (isApiError(error) && error.code && SAVED_GATE_CODES.has(error.code)) {
+        // The server kept the code, so record that in the status cache too.
+        // Without this the cache still says "not configured", and a remount
+        // inside the stale window would ask for a code that is already saved —
+        // exactly the retype this feature exists to prevent. Invalidate the
+        // status key as well so a fresh read replaces the optimistic one.
+        queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
+          prev ? { ...prev, playlist_code_configured: true } : prev,
+        );
+        queryClient.invalidateQueries({ queryKey: SOURCE_STATUS_QUERY_KEY });
         setOutcome({ kind: "saved", copy: describeSourceError(error) });
         return;
       }
@@ -112,7 +120,10 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
 
   const saved = outcome?.kind === "saved";
   const failed = outcome?.kind === "failed" ? outcome.copy : null;
-  const showForm = !saved && (statusNeedsEntry || requestNeedsEntry || failed !== null);
+  // Defer to server truth: once the status says a code is configured, do not
+  // keep forcing the form just because a request once failed or an old error
+  // still asks for a code.
+  const showForm = !saved && !configured && (needsCode || requestNeedsEntry || failed !== null);
   const showConfigured = !saved && !showForm && needsCode && configured;
 
   if (!saved && !showForm && !showConfigured) return null;
@@ -124,7 +135,9 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
     // Clear before the request settles: the entered value must not stay in the
     // mounted DOM, and on failure the user retypes against the error copy.
     setCode("");
-    submit.mutate(value);
+    // Drop the mutation's retained variables once it settles, so the code is
+    // not kept in React Query state after it has been sent.
+    submit.mutate(value, { onSettled: () => submit.reset() });
   };
 
   return (
@@ -188,6 +201,7 @@ export default function PlaylistCodeGate({ errors = [] }: PlaylistCodeGateProps)
               value={code}
               onChange={(event) => setCode(event.target.value)}
               placeholder="Enter your AdoboTV playlist code"
+              autoComplete="off"
               autoFocus={failed === null}
               disabled={submit.isPending}
               className="w-full px-3 py-2.5 rounded-xl bg-slate-950/50 border border-white/10 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-orange-500/40 focus:ring-1 focus:ring-orange-500/20 disabled:opacity-60"
