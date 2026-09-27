@@ -385,10 +385,9 @@ func (h *SourceHandler) SetPlaylistFile(c *gin.Context) {
 	}
 	defer os.Remove(tmp)
 
-	format := playlistfile.FormatOf(tmp)
 	if _, err := h.open(h.configWithFile(tmp)); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": importRejectionMessage(err, tmp, format),
+			"error": importRejectionMessage(err, tmp, data),
 			"code":  codeInvalidPlaylist,
 		})
 		return
@@ -407,9 +406,11 @@ func (h *SourceHandler) SetPlaylistFile(c *gin.Context) {
 	candidate, err := h.open(h.configWithFile(saved))
 	if err != nil {
 		// The same bytes parsed from the scratch file, so a failure here is the
-		// final path, not the content. Do not leave a stored playlist the server
-		// cannot open.
+		// final path, not the content. Remove the unopenable playlist AND release
+		// any remembered file mode, or the next boot would be left pointing at a
+		// playlist that is gone.
 		_ = h.files.Clear()
+		h.clearFileModeIfRemembered()
 		log.Printf("source playlist file: opening stored playlist: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "could not open the saved playlist",
@@ -418,7 +419,10 @@ func (h *SourceHandler) SetPlaylistFile(c *gin.Context) {
 		return
 	}
 	if err := h.modes.Save(file.Name); err != nil {
-		_ = h.files.Clear()
+		// Leave the stored playlist in place: it is valid and self-consistent,
+		// and removing it here would strand a remembered file mode on a playlist
+		// that is gone. The mode simply was not updated, so the boot stays
+		// coherent; a retry re-saves it.
 		log.Printf("source playlist file: saving mode: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "could not save the source mode",
@@ -440,6 +444,22 @@ func (h *SourceHandler) SetPlaylistFile(c *gin.Context) {
 // boot. An env-pinned source is left running: it reads its own path, not the
 // imported one.
 func (h *SourceHandler) DeletePlaylistFile(c *gin.Context) {
+	// Release the remembered mode BEFORE removing the file it points at. If the
+	// mode clear fails, the playlist is still there and the next boot opens it;
+	// clearing the file first would let a mode-clear failure strand the boot on a
+	// mode pointing at a playlist that is gone.
+	wasActiveFile := h.activeName() == file.Name && !h.pinned()
+	if wasActiveFile {
+		if err := h.modes.Clear(); err != nil {
+			log.Printf("source playlist file: clearing mode: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "could not clear the source mode",
+				"code":  codeInternalError,
+			})
+			return
+		}
+	}
+
 	if err := h.files.Clear(); err != nil {
 		log.Printf("source playlist file: clearing: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -449,20 +469,34 @@ func (h *SourceHandler) DeletePlaylistFile(c *gin.Context) {
 		return
 	}
 
-	if h.activeName() == file.Name && !h.pinned() {
-		if err := h.modes.Clear(); err != nil {
-			log.Printf("source playlist file: clearing mode: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "could not clear the source mode",
-				"code":  codeInternalError,
-			})
-			return
-		}
+	if wasActiveFile {
 		h.player.SwapSource(source.Unconfigured())
 		log.Printf("[source] imported playlist cleared; server is sourceless until a mode is chosen")
 	}
 
 	c.JSON(http.StatusOK, h.statusBody())
+}
+
+// clearFileModeIfRemembered releases a stored mode that names the file adapter,
+// so a compensation which has just removed the imported playlist cannot leave
+// the next boot pointing at a playlist that is gone. It never touches an
+// env-pinned mode — the environment owns that choice, not the UI — and a failure
+// to read the mode is logged and left alone rather than guessed at.
+func (h *SourceHandler) clearFileModeIfRemembered() {
+	if h.pinned() {
+		return
+	}
+	res, err := h.modes.Resolve(h.envSource)
+	if err != nil {
+		log.Printf("source playlist file: reading mode during cleanup: %v", err)
+		return
+	}
+	if res.Mode != file.Name {
+		return
+	}
+	if err := h.modes.Clear(); err != nil {
+		log.Printf("source playlist file: clearing mode during cleanup: %v", err)
+	}
 }
 
 // statusBody is the status response without the account decorations. It is
@@ -533,6 +567,12 @@ func (h *SourceHandler) modeConfigured(name string) bool {
 		return h.codeConfigured()
 	case source.NeedsPlaylistFile(name):
 		return h.fileConfigured()
+	case source.NeedsDatabase(name):
+		// A database-backed adapter is configured when the server holds the
+		// handle its requirement asks for, supplied at boot. Today the only such
+		// adapter is the dev harness, which nothing renders; the field should
+		// still describe it rather than hardcode false.
+		return h.cfg.DB != nil
 	default:
 		return false
 	}
@@ -564,6 +604,13 @@ func (h *SourceHandler) fileConfigured() bool {
 // stored mode file is unreadable: the status endpoint must always answer, and
 // the environment override is known without touching the store.
 func (h *SourceHandler) origin() string {
+	// With no live source nothing came from anywhere: report none even when a
+	// mode is still remembered on disk. This is the state a stored mode the boot
+	// could not open falls back to, and status must describe the sourceless
+	// server it is actually running, not the choice that would not open.
+	if h.activeName() == "" {
+		return sourcemode.OriginNone
+	}
 	res, err := h.modes.Resolve(h.envSource)
 	if err == nil {
 		return res.Origin
@@ -572,10 +619,7 @@ func (h *SourceHandler) origin() string {
 	if h.pinned() {
 		return sourcemode.OriginEnv
 	}
-	if h.activeName() != "" {
-		return sourcemode.OriginStored
-	}
-	return sourcemode.OriginNone
+	return sourcemode.OriginStored
 }
 
 // state reports whether the active source uses a playlist code and whether one
@@ -653,11 +697,12 @@ func (h *SourceHandler) configWithFile(path string) source.Config {
 // instead, and points at the documented format. The parser's reason is what the
 // owner asked for: "if they followed the json format correctly" is only
 // checkable if a wrong import says what was wrong.
-func importRejectionMessage(err error, tempPath string, format playlistfile.Format) string {
-	label := "JSON"
-	if format == playlistfile.FormatM3U {
-		label = "M3U"
-	}
+//
+// The named format is the one the content actually matches, not the one the
+// adapter guessed. A file that matches neither shape — a bare list of URLs, say
+// — is reported as matching neither rather than blamed on JSON, which would
+// send the user to fix the wrong thing.
+func importRejectionMessage(err error, tempPath string, data []byte) string {
 	const guidance = "See the documented format in docs/source-adapters.md."
 
 	cause := err.Error()
@@ -665,6 +710,14 @@ func importRejectionMessage(err error, tempPath string, format playlistfile.Form
 	case errors.Is(err, file.ErrMalformedLibrary):
 		cause = strings.TrimPrefix(cause, file.ErrMalformedLibrary.Error()+": ")
 		cause = strings.TrimPrefix(cause, tempPath+": ")
+		format, recognized := playlistfile.SniffFormat(data)
+		if !recognized {
+			return fmt.Sprintf("the playlist did not match the JSON envelope or M3U format AdoboFlix reads. %s", guidance)
+		}
+		label := "JSON"
+		if format == playlistfile.FormatM3U {
+			label = "M3U"
+		}
 		return fmt.Sprintf("the playlist could not be parsed as %s: %s. %s", label, cause, guidance)
 	case errors.Is(err, file.ErrUnsupportedFormat):
 		cause = strings.TrimPrefix(cause, file.ErrUnsupportedFormat.Error()+": ")

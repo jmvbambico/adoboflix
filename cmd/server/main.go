@@ -136,23 +136,21 @@ func main() {
 	}
 
 	// Open the selected source adapter. Handlers only ever see this interface.
-	// With no mode and no override, open the unconfigured source instead of a
-	// real one: every content route answers with a clear source_not_configured
-	// until the user chooses, and the player never holds a nil.
-	var playerSource source.Source
-	if sourceName == "" {
-		playerSource = source.Unconfigured()
+	// The boot policy distinguishes operator configuration from user state; see
+	// openBootSource. A stored mode that will not open is not fatal, so a mode
+	// stranded by a crash or a failed compensation cannot stop the server from
+	// starting and offering the chooser again.
+	playerSource, err := openBootSource(cfg, resolution.Origin == sourcemode.OriginEnv, source.Open)
+	if err != nil {
+		log.Fatalf("Failed to open source %q: %v", sourceName, err)
+	}
+	if playerSource.Name() == "" {
+		sourceName = ""
 		log.Printf("[source] no source configured; choose one at POST /api/v1/source/playlist-code or POST /api/v1/source/playlist-file")
+	} else if resolution.Origin == sourcemode.OriginEnv {
+		log.Printf("[source] using %q (pinned by %s)", sourceName, source.EnvSource)
 	} else {
-		playerSource, err = source.Open(cfg)
-		if err != nil {
-			log.Fatalf("Failed to open source %q: %v", sourceName, err)
-		}
-		if resolution.Origin == sourcemode.OriginEnv {
-			log.Printf("[source] using %q (pinned by %s)", sourceName, source.EnvSource)
-		} else {
-			log.Printf("[source] using %q (chosen in the UI)", sourceName)
-		}
+		log.Printf("[source] using %q (chosen in the UI)", sourceName)
 	}
 
 	// Setup Gin router
@@ -282,4 +280,39 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[shutdown] http server: %v", err)
 	}
+}
+
+// openBootSource opens the source the server boots with, applying the policy
+// that separates operator configuration from user state:
+//
+//   - no source at all (an empty name) is the sourceless chooser the UI offers
+//     its two paths from — a valid state, not an error;
+//   - a source that opens is used;
+//   - an env-pinned source that will not open is fatal to the caller. It is
+//     explicit operator configuration, and silently substituting the chooser
+//     would hide a broken deployment;
+//   - a *stored* mode that will not open is user state. The server falls back
+//     to sourceless and logs the real cause, so the user can import or log in
+//     again. It must not exit: a remembered mode can be stranded by a crash or a
+//     failed compensation, and refusing to boot would blame the user for a file
+//     they do not know exists.
+//
+// open is injected so the policy can be tested without a real adapter.
+func openBootSource(
+	cfg source.Config,
+	pinned bool,
+	open func(source.Config) (source.Source, error),
+) (source.Source, error) {
+	if cfg.Name == "" {
+		return source.Unconfigured(), nil
+	}
+	src, err := open(cfg)
+	if err == nil {
+		return src, nil
+	}
+	if pinned {
+		return nil, err
+	}
+	log.Printf("[source] the remembered source %q could not be opened: %v; starting with no source so one can be chosen again", cfg.Name, err)
+	return source.Unconfigured(), nil
 }

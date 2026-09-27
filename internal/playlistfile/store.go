@@ -144,12 +144,12 @@ func FormatOf(path string) Format {
 	return FormatM3U
 }
 
-// detectFormat guesses the format from the content's shape: M3U begins with a
-// directive (#) or carries the markers the adapter requires, and JSON begins
-// with { or [. It is a two-way guess between the adapter's only two formats,
-// not a parser — the adapter still does the real parse, by the extension this
-// choice produces.
-func detectFormat(data []byte) Format {
+// SniffFormat reports the format the content looks like and whether it matches
+// one of the two shapes the adapter reads at all: an M3U (a leading directive,
+// or the #EXTM3U / #EXTINF markers) or JSON (a leading { or [). ok is false for
+// content that matches neither — a bare list of URLs, say. Callers use that to
+// describe a rejection honestly instead of guessing JSON.
+func SniffFormat(data []byte) (Format, bool) {
 	sample := data
 	if len(sample) > 8192 {
 		sample = sample[:8192]
@@ -157,9 +157,23 @@ func detectFormat(data []byte) Format {
 	s := strings.TrimPrefix(string(sample), "\ufeff")
 	trimmed := strings.TrimLeft(s, " \t\r\n")
 	if strings.HasPrefix(trimmed, "#") || strings.Contains(s, "#EXTM3U") || strings.Contains(s, "#EXTINF") {
-		return FormatM3U
+		return FormatM3U, true
 	}
-	return FormatJSON
+	if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		return FormatJSON, true
+	}
+	return FormatJSON, false
+}
+
+// detectFormat guesses the format from the content's shape. It is a two-way
+// guess between the adapter's only two formats, not a parser — the adapter
+// still does the real parse, by the extension this choice produces. Content
+// matching neither shape is given the JSON extension so it still fails loudly
+// in the JSON parser rather than being accepted silently; SniffFormat is what
+// callers use to say so honestly in a rejection.
+func detectFormat(data []byte) Format {
+	format, _ := SniffFormat(data)
+	return format
 }
 
 // WriteTemp writes data to a scratch file in the store's directory, with the

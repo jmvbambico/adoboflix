@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
 	"github.com/jmvbambico/adoboflix/internal/source"
 	"github.com/jmvbambico/adoboflix/internal/source/adobotvhttp"
 	"github.com/jmvbambico/adoboflix/internal/source/file"
@@ -137,6 +138,26 @@ func TestSourceStatusEnvFilePathHasNoPlaylistImportedAt(t *testing.T) {
 	}
 	if _, present := body["playlist_imported_at"]; present {
 		t.Errorf("playlist_imported_at = %v, want it absent for an env-supplied path", body["playlist_imported_at"])
+	}
+}
+
+// modeConfigured means "the server has what it needs to open this adapter". A
+// database-backed adapter is configured exactly when the server holds its
+// handle, rather than reporting a hardcoded false.
+func TestModeConfiguredReportsDatabaseAdapter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	const name = "test-status-db-mode"
+	source.Register(name, source.Requirement{Database: true}, func(source.Config) (source.Source, error) {
+		return &codeStubSource{name: name}, nil
+	})
+
+	h, _, _ := newTestSourceHandler(t, source.Config{}, "")
+	if h.modeConfigured(name) {
+		t.Error("configured = true, want false without a database handle")
+	}
+	h.cfg.DB = &sqlx.DB{}
+	if !h.modeConfigured(name) {
+		t.Error("configured = false, want true with a database handle")
 	}
 }
 

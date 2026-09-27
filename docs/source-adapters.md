@@ -54,6 +54,14 @@ The remembered mode is the user's most recent explicit instruction, so it wins
 over nothing but the override — the same precedence shape the playlist code
 uses. A malformed mode file is a startup error, never a silent default.
 
+A stored mode that *resolves* but whose adapter will not open is a different
+case: it is user state, so the server falls back to **no source** rather than
+exiting, logging why, and the chooser lets the user import or log in again. (A
+stored `file` mode with no playlist stored — a state a crash or a failed
+compensation can leave behind — is the common way in.) An env-pinned source
+that will not open is still **fatal**: that is explicit operator configuration,
+and silently substituting the chooser would hide a broken deployment.
+
 ---
 
 ## `adobotv-http` — the whole flow hangs off one credential
