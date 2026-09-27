@@ -1071,14 +1071,6 @@ export default function Dashboard() {
                                     </div>
                                   )}
 
-                                  {/* Duration badge */}
-                                  {ep.duration && (
-                                    <div className="absolute bottom-2 right-2 z-10">
-                                      <span className="text-[7px] font-mono text-white/70 bg-black/60 px-1.5 py-0.5 rounded">
-                                        {ep.duration}
-                                      </span>
-                                    </div>
-                                  )}
                                 </div>
 
                                 {/* Card footer */}
@@ -1695,7 +1687,7 @@ export default function Dashboard() {
                           return (
                             <motion.div
                               key={hist.videoId}
-                              whileHover={{ x: 6, bg: "rgba(255, 255, 255, 0.05)" }}
+                              whileHover={{ x: 6, backgroundColor: "rgba(255, 255, 255, 0.05)" }}
                               className="p-4 rounded-xl glass-panel flex flex-col md:flex-row items-center justify-between gap-4 cursor-pointer"
                               onClick={() => triggerPlayVideo(vid)}
                             >
