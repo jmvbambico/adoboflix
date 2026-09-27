@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
@@ -6,6 +7,15 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
+    test: {
+      environment: 'jsdom',
+      setupFiles: ['./src/test/setup.ts'],
+      include: ['src/**/*.{test,spec}.{ts,tsx}'],
+      // Pin NODE_ENV here rather than in the npm script: a shell prefix is not
+      // portable, and with an ambient NODE_ENV=production React resolves its
+      // production build, which has no React.act and breaks every render().
+      env: { NODE_ENV: 'test' },
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

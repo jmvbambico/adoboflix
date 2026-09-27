@@ -29,6 +29,10 @@ gates:
     scope: worker
     command: npm run lint
     cwd: client
+  - name: client-test
+    scope: worker
+    command: npm run test:run
+    cwd: client
 # No integration suite exists yet. When one is added, give it scope: integration
 # so it runs only on the integration branch.
 
