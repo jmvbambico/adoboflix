@@ -51,13 +51,22 @@ describe("formatImportedAt", () => {
     expect(text).toMatch(/^Imported today at /);
   });
 
-  // The billed_till lesson: absence must never become an epoch date.
+  // An offset zone is still RFC3339 and must render.
+  it("accepts a numeric zone offset", () => {
+    expect(formatImportedAt("2026-03-12T09:30:00+08:00")).toMatch(/^Imported /);
+  });
+
+  // The billed_till lesson: absence must never become an epoch date, and Date's
+  // lenient parser must not turn a non-ISO sentinel into a plausible one.
   it.each([
     ["undefined", undefined],
     ["empty", ""],
     ["unparseable", "not-a-date"],
     ["the epoch itself", "1970-01-01T00:00:00Z"],
     ["Go's zero time", "0001-01-01T00:00:00Z"],
+    ["a bare-year sentinel", "0"],
+    ["a date with no time", "2000-01-01"],
+    ["a space-separated datetime", "2026-03-12 09:30:00"],
   ])("renders nothing for %s", (_label, value) => {
     expect(formatImportedAt(value)).toBeNull();
   });

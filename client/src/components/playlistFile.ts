@@ -47,6 +47,12 @@ export function usePlaylistFileController() {
       setOutcome({ kind: "imported" });
     },
     onError: (error) => {
+      // A rejected import usually changed nothing, but the failure paths that
+      // remove an unopenable playlist stop the live source. Drop the cached
+      // status so the next render reflects what the server actually did rather
+      // than the source the user was on before the attempt; a normal rejection
+      // refetches the same answer.
+      queryClient.invalidateQueries({ queryKey: SOURCE_STATUS_QUERY_KEY });
       setOutcome({
         kind: "failed",
         copy: describeSourceError(error),

@@ -27,11 +27,19 @@ export function describePlaylistContents(
   return "This playlist has no channels or titles — check the file, or import a different one.";
 }
 
+// RFC3339 as the status contract specifies it: a full date, a time, and a zone
+// (Z or ±hh:mm), with optional fractional seconds. Requiring the shape keeps
+// Date's lenient parser from accepting a non-ISO sentinel — Date("0") is a real
+// instant (1 Jan 2000) and would otherwise render as a date the server never
+// sent. The field crosses a process boundary, so the shape is checked, not
+// assumed.
+const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
 // formatImportedAt turns the RFC3339 import time into something readable at a
-// glance. A missing, unparseable, zero or pre-epoch value renders as nothing:
-// absence must never become an epoch date (the billed_till lesson).
+// glance. A missing, non-ISO, unparseable, zero or pre-epoch value renders as
+// nothing: absence must never become an epoch date (the billed_till lesson).
 export function formatImportedAt(iso: string | undefined): string | null {
-  if (!iso) return null;
+  if (!iso || !RFC3339.test(iso)) return null;
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return null;
 

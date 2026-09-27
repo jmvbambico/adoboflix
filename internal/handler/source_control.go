@@ -411,6 +411,14 @@ func (h *SourceHandler) SetPlaylistFile(c *gin.Context) {
 		// playlist that is gone.
 		_ = h.files.Clear()
 		h.clearFileModeIfRemembered()
+		// If the live source is the file adapter, it reads the store's single
+		// path — the one just removed — so it must stop claiming to serve it.
+		// Without this, status would report an active source whose backing file
+		// is gone and the UI would keep rendering a playlist that does not exist
+		// until a reload.
+		if h.activeName() == file.Name && !h.pinned() {
+			h.player.SwapSource(source.Unconfigured())
+		}
 		log.Printf("source playlist file: opening stored playlist: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "could not open the saved playlist",

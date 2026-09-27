@@ -191,6 +191,21 @@ describe("PlaylistImportModal", () => {
     expect(screen.queryByLabelText("Playlist file")).not.toBeInTheDocument();
   });
 
+  // A rejected import may have stopped the live source (the unopenable-playlist
+  // path), so the cached status must be dropped to reflect what the server did.
+  it("drops the cached status when an import fails", async () => {
+    installBackend({
+      post: { status: 400, body: { error: "bad", code: "invalid_playlist" } },
+    });
+    const { queryClient } = renderModal();
+    const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+
+    chooseFile(new File(["{ bad"], "broken.json", { type: "application/json" }));
+
+    expect(await screen.findByText("That playlist could not be read")).toBeInTheDocument();
+    expect(invalidate).toHaveBeenCalled();
+  });
+
   it("closes on Escape", async () => {
     installBackend();
     const { onClose } = renderModal();

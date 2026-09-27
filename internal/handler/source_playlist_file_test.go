@@ -309,11 +309,14 @@ func TestSetPlaylistFileBareURLListRejectedWithoutBlamingJSON(t *testing.T) {
 // remembered file mode, or the next boot would point at a playlist that is gone.
 func TestSetPlaylistFileUnopenableStoredPlaylistReleasesTheFileMode(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	h, _, _ := newTestSourceHandler(t, source.Config{Name: file.Name}, "")
+	h, player, _ := newTestSourceHandler(t, source.Config{Name: file.Name}, "")
 	// The user is already on the file mode (a re-import), so a stranded mode
 	// would point at the playlist this failure removes.
 	if err := h.modes.Save(file.Name); err != nil {
 		t.Fatalf("seed stored mode: %v", err)
+	}
+	if player.src().Name() != file.Name {
+		t.Fatalf("precondition: live source = %q, want %q", player.src().Name(), file.Name)
 	}
 
 	calls := 0
@@ -334,6 +337,16 @@ func TestSetPlaylistFileUnopenableStoredPlaylistReleasesTheFileMode(t *testing.T
 	}
 	if mode, ok, _ := h.modes.Load(); ok {
 		t.Errorf("mode = %q, want it released with the playlist it pointed at", mode)
+	}
+
+	// The live source must stop claiming to serve the playlist just removed, so
+	// status cannot report an active source whose backing file is gone.
+	if player.src().Name() != "" {
+		t.Errorf("live source = %q, want it stopped when its playlist was removed", player.src().Name())
+	}
+	body := statusBody(t, h)
+	if body["active"] != false || body["source"] != "" || body["playlist_file_configured"] != false {
+		t.Errorf("status = %v, want the sourceless state after the playlist was removed", body)
 	}
 }
 

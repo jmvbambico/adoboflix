@@ -185,6 +185,15 @@ async function openMenu(queryClient: QueryClient, label = "AdoboTV account") {
   return button;
 }
 
+// settleMutations flushes a macrotask so a deferred mutation has reached fetch.
+// React Query starts a mutation asynchronously — its mutationFn runs after at
+// least one await — so a synchronous "no DELETE" assertion after Cancel passes
+// even when a handler wrongly fired the mutation. Awaiting this first makes the
+// absence real.
+function settleMutations() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe("AccountMenu", () => {
   it("is a labelled, keyboard-openable menu button", async () => {
     renderMenu();
@@ -514,7 +523,11 @@ describe("AccountMenu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /remove playlist/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
 
+    // Positive: the confirmation is gone (the Cancel button existed to click).
     expect(screen.queryByText(/returns you to the start screen/i)).not.toBeInTheDocument();
+    // Negative, made non-vacuous: the mutation is deferred, so let it run before
+    // asserting no DELETE — a Cancel that also fired remove.mutate() is caught.
+    await settleMutations();
     expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
@@ -579,7 +592,11 @@ describe("AccountMenu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /disconnect/i }));
     fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
 
+    // Positive: the confirmation is gone (the Cancel button existed to click).
     expect(screen.queryByText(/type it in again in full/i)).not.toBeInTheDocument();
+    // Negative, made non-vacuous: let the deferred mutation run first, so a
+    // Cancel that also fired clear.mutate() is caught.
+    await settleMutations();
     expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
   });
 
