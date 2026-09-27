@@ -15,9 +15,14 @@ import { useQuery } from "@tanstack/react-query";
 import { FileUp, KeyRound, LogOut, RefreshCw, Trash2, User } from "lucide-react";
 import { fetchChannelCount, fetchStats, type AppStats } from "../api/client";
 import { describeSourceError, sourceStatusCopy } from "./sourceStatus";
-import { usePlaylistCodeController } from "./playlistCode";
+import { usePlaylistCodeController, useSourceSync } from "./playlistCode";
 import { usePlaylistFileController } from "./playlistFile";
-import { describePlaylistContents, formatImportedAt } from "./playlistFacts";
+import {
+  describePlaylistContents,
+  formatImportedAt,
+  formatLastSynced,
+  formatRevalidateAt,
+} from "./playlistFacts";
 import { activeSourceLabel, isPinned, selectableModes } from "./sourceModes";
 import PlaylistCodeModal from "./PlaylistCodeModal";
 import PlaylistImportModal from "./PlaylistImportModal";
@@ -60,6 +65,7 @@ export default function AccountMenu() {
   const wasConfirming = useRef(false);
 
   const { statusQuery, clear } = usePlaylistCodeController();
+  const { sync, syncError } = useSourceSync();
   const { remove, removeError } = usePlaylistFileController();
   const status = statusQuery.data;
   const needsCode = Boolean(status?.needs_playlist_code);
@@ -102,6 +108,10 @@ export default function AccountMenu() {
   });
   const contents = describePlaylistContents(statsQuery.data?.total_titles, channelsQuery.data);
   const importedAt = formatImportedAt(status?.playlist_imported_at);
+  // Sync state is only real for an upstream-backed source; an imported playlist
+  // reports neither field and both render nothing.
+  const lastSynced = formatLastSynced(status?.last_synced_at);
+  const revalidateAt = formatRevalidateAt(status?.playlist_revalidate_at);
 
   const closeMenu = useCallback((refocus: boolean) => {
     setOpen(false);
@@ -260,6 +270,12 @@ export default function AccountMenu() {
                     {status.user_message}
                   </span>
                 )}
+                {configured && lastSynced && (
+                  <span className="text-[11px] text-slate-400">{lastSynced}</span>
+                )}
+                {configured && revalidateAt && (
+                  <span className="text-[11px] text-slate-500">{revalidateAt}</span>
+                )}
               </>
             ) : isImport ? (
               <>
@@ -382,6 +398,23 @@ export default function AccountMenu() {
 
               {needsCode && configured && (
                 <>
+                  {confirming !== "disconnect" && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => sync.mutate()}
+                      disabled={sync.isPending}
+                      className="px-3 py-2 rounded-lg border border-white/10 text-slate-200 hover:bg-white/5 text-[11px] font-semibold flex items-center gap-2 transition-all cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${sync.isPending ? "animate-spin" : ""}`} />
+                      {sync.isPending ? "Syncing…" : "Sync now"}
+                    </button>
+                  )}
+                  {syncError && (
+                    <p role="alert" className="px-1 text-[11px] leading-relaxed text-red-300">
+                      {syncError.message}
+                    </p>
+                  )}
                   {confirming === "disconnect" ? (
                     <div className="flex flex-col gap-2" role="none">
                       <p className="text-[11px] leading-relaxed text-slate-300">

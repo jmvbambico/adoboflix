@@ -307,6 +307,16 @@ export interface SourceStatus {
   // sourceless state omit it, so an absent field must render as nothing — never
   // as a zero or epoch date.
   playlist_imported_at?: string;
+  // last_synced_at is RFC3339 and present only when the active source fetches a
+  // remote library and has fetched one (the AdoboTV path). An imported playlist
+  // has nothing to sync, and a source that has not fetched yet reports nothing;
+  // absent must render as nothing, never as an epoch date.
+  last_synced_at?: string;
+  // playlist_revalidate_at is RFC3339 and present only when a playlist code is
+  // stored for a code-taking source: it is when the server will next re-check
+  // that the code still works. It is a re-check, not an expiry — a code that
+  // still works is reconfirmed silently. Absent must render as nothing.
+  playlist_revalidate_at?: string;
   subscription_expires_at?: string; // RFC3339, e.g. "2030-01-01T00:00:00Z"
   user_message?: string;
 }
@@ -327,6 +337,14 @@ export function setPlaylistCode(code: string): Promise<SourceStatus> {
 // remains (an environment fallback, or the unconfigured state).
 export function clearPlaylistCode(): Promise<SourceStatus> {
   return sendJSON<SourceStatus>("DELETE", `${API_BASE}/source/playlist-code`);
+}
+
+// Refresh the active source's library now, returning the updated status so the
+// caller can show the new last-synced time without a second read. A source with
+// nothing to sync (an imported playlist) answers 501 sync_unsupported; the UI
+// simply does not offer the action there.
+export function syncSource(): Promise<SourceStatus> {
+  return sendJSON<SourceStatus>("POST", `${API_BASE}/source/sync`);
 }
 
 // Import a local playlist as the file mode. The content is the file the user

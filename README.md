@@ -64,6 +64,7 @@ Configuration is via environment variables (`.env`, documented in
 | `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
 | `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (optional; the UI can enter one instead) |
 | `ADOBOFLIX_PLAYLIST_CODE_FILE` | `.adoboflix/playlist-code` | Where a UI-entered playlist code is stored (0600) |
+| `ADOBOFLIX_PLAYLIST_REVALIDATE_INTERVAL` | `168h` | How long a stored playlist code is trusted before it is re-checked against AdoboTV. A re-check, not an expiry — see below. `0` disables it |
 | `ADOBOFLIX_PLAYLIST_FILE` | `.adoboflix/playlist` | Where a UI-imported playlist is stored (0600); the extension is added per format |
 | `ADOBOFLIX_FILE_PATH` | — | Playlist path used by `file` when nothing has been imported |
 | `SERVER_HOST` | `127.0.0.1` | Bind address |
@@ -110,6 +111,49 @@ does not parse is rejected with an error naming what was wrong, and neither the
 file nor the mode is written. On success the source switches to `file`, and the
 choice is remembered. `DELETE` clears the imported playlist; if it was the
 active source, the server returns to the sourceless state above.
+
+### The session: a weekly re-check, not an expiry
+
+A playlist code entered in the UI is trusted for **one week**
+(`ADOBOFLIX_PLAYLIST_REVALIDATE_INTERVAL`, default `168h`). When that window
+lapses, the server re-checks the stored code against AdoboTV on the next boot.
+This is **not** a session that expires: nothing upstream expires, and a code
+that still works is re-confirmed silently, resetting the window, so the user
+never sees it.
+
+Only a **definitive rejection** — `playlist_rejected`, meaning AdoboTV refused
+the code itself — ends the session and clears the stored code, returning the
+user to the source chooser. Every other outcome leaves the credential exactly
+where it is, because none of them says anything about whether the code is good:
+
+| Re-check outcome | Session |
+|---|---|
+| the code works | kept, window reset |
+| `device_pending`, `subscription_inactive`, `playlist_format_m3u`, `content_token_rejected`, `content_not_found` | kept — AdoboTV recognised the code; the gate is elsewhere |
+| `playlist_rejected` | **ended** — the code itself was refused |
+| `user_agent_rejected`, a malformed response, `upstream_error`, a timeout or a dead network | kept — inconclusive, so nothing is cleared |
+
+Getting this backwards would silently destroy a user's credential on a network
+blip, so the set of outcomes that prove a code invalid is kept as an explicit
+list, not the negation of "proven valid". Set the interval to `0` to disable the
+re-check; an environment-supplied code (`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE`) has
+no session at all.
+
+### Sync
+
+For the AdoboTV source, the library is cached for five minutes and refetched on
+a read when stale. On top of that the server **refreshes once a day**, on the
+first day change it observes after boot, so the first page load of the day is
+warm. The check re-reads the calendar date rather than arming a timer for
+midnight, so a laptop that sleeps across midnight refreshes when it wakes
+instead of skipping the day. A failed refresh is logged and ignored — the
+library is left as it was and the next read refreshes on the TTL — so it is
+never an error state for the app.
+
+When an AdoboTV source is active, the account menu shows **when it last synced**
+and offers **Sync now** (`POST /api/v1/source/sync`). An imported playlist has
+nothing to sync and no session, so neither is shown; its playlist is a snapshot
+the user re-imports to update.
 
 The bind address defaults to **loopback**. `/api/v1/proxy` is an
 unauthenticated fetcher and `/api/v1/resolve` returns the upstream CDN URL, so

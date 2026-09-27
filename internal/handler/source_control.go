@@ -85,7 +85,27 @@ type SourceHandler struct {
 	// open reopens an adapter from a configuration. It is a field so tests can
 	// exercise the endpoints without a live AdoboTV.
 	open func(source.Config) (source.Source, error)
+	// sessionWindow is how long a stored playlist code is trusted before it is
+	// re-checked against AdoboTV. Zero or negative disables the re-check, so the
+	// credential is trusted until the user disconnects it. It is a duration, not
+	// an expiry: see RevalidateSession.
+	sessionWindow time.Duration
+	// now is the clock the session window is measured against. It is a field so
+	// the window can be exercised without waiting real days.
+	now func() time.Time
 }
+
+// DefaultSessionWindow is how long a stored playlist code is trusted before the
+// server re-checks it against AdoboTV: one week, matching the owner's "session"
+// lifetime. The re-check is silent — a code that still works is reconfirmed and
+// the user never sees it, and only a definitive rejection ends the session. See
+// RevalidateSession.
+const DefaultSessionWindow = 7 * 24 * time.Hour
+
+// EnvSessionWindow overrides DefaultSessionWindow. It is a Go duration string
+// (e.g. "168h" for a week); "0" or a negative value disables the re-check, so
+// the stored code is trusted until the user disconnects it.
+const EnvSessionWindow = "ADOBOFLIX_PLAYLIST_REVALIDATE_INTERVAL"
 
 // SourceHandlerOptions wires the source endpoints to their collaborators.
 type SourceHandlerOptions struct {
@@ -106,21 +126,32 @@ type SourceHandlerOptions struct {
 	EnvFilePath string
 	// EnvSource is the ADOBOFLIX_SOURCE override, "" when unset.
 	EnvSource string
+	// SessionWindow is how long a stored playlist code is trusted before it is
+	// re-checked. Zero disables the re-check. See DefaultSessionWindow.
+	SessionWindow time.Duration
+	// Clock overrides the session window's time source. Nil means time.Now.
+	Clock func() time.Time
 }
 
 // NewSourceHandler wires the endpoints to the live player (whose source is
 // swapped), the stores, and the selected source configuration.
 func NewSourceHandler(opts SourceHandlerOptions) *SourceHandler {
+	clock := opts.Clock
+	if clock == nil {
+		clock = time.Now
+	}
 	return &SourceHandler{
-		player:    opts.Player,
-		cfg:       opts.Config,
-		codes:     opts.CodeStore,
-		modes:     opts.ModeStore,
-		files:     opts.FileStore,
-		envCode:   opts.EnvPlaylistCode,
-		envFile:   opts.EnvFilePath,
-		envSource: opts.EnvSource,
-		open:      source.Open,
+		player:        opts.Player,
+		cfg:           opts.Config,
+		codes:         opts.CodeStore,
+		modes:         opts.ModeStore,
+		files:         opts.FileStore,
+		envCode:       opts.EnvPlaylistCode,
+		envFile:       opts.EnvFilePath,
+		envSource:     opts.EnvSource,
+		open:          source.Open,
+		sessionWindow: opts.SessionWindow,
+		now:           clock,
 	}
 }
 
@@ -531,7 +562,241 @@ func (h *SourceHandler) statusBody() gin.H {
 	if importedAt, ok := h.files.ModTime(); ok {
 		body["playlist_imported_at"] = importedAt.UTC().Format(time.RFC3339)
 	}
+	// last_synced_at is the last time the active source fetched its library
+	// from upstream. It is read from the source's own cached timestamp, so this
+	// endpoint stays cache-only and never touches the network — the same reason
+	// the account facts are read from cache. A source with no upstream library
+	// (an imported playlist) has no sync concept and reports nothing.
+	if provider, ok := h.player.src().(source.SyncProvider); ok {
+		if at, ok := provider.LastSyncedAt(); ok {
+			body["last_synced_at"] = at.UTC().Format(time.RFC3339)
+		}
+	}
+	// playlist_revalidate_at is when the stored code will next be re-checked
+	// against AdoboTV. It is the session window applied to the stored file's
+	// clock, reported only when a stored code exists for a code-taking source.
+	// Omitted otherwise, never sent as a zero time.
+	if at, ok := h.nextRevalidateAt(); ok {
+		body["playlist_revalidate_at"] = at.UTC().Format(time.RFC3339)
+	}
 	return body
+}
+
+// storedSession returns the stored playlist code and when it was last written,
+// which is the clock the revalidation window runs against. ok is false when no
+// code is stored here — an environment-supplied code has no file and therefore
+// no session, because it is operator configuration rather than the user's
+// credential to re-check. A stored file that cannot be stat-ed is treated the
+// same way, so a transient filesystem fault cannot be mistaken for a due
+// re-check.
+func (h *SourceHandler) storedSession() (code string, at time.Time, ok bool, err error) {
+	code, stored, err := h.codes.Load()
+	if err != nil || !stored {
+		return "", time.Time{}, false, err
+	}
+	at, has := h.codes.ModTime()
+	if !has {
+		return "", time.Time{}, false, nil
+	}
+	return code, at, true, nil
+}
+
+// SessionDue reports whether the stored code is old enough to re-check. It is
+// the gate RevalidateSession applies, exposed so a caller can decide whether a
+// re-check is worth attempting. It is false when revalidation is disabled, when
+// no code is stored, or when the active source does not take a code — an
+// import user has no session to re-check.
+func (h *SourceHandler) SessionDue() bool {
+	if h.sessionWindow <= 0 {
+		return false
+	}
+	if !source.NeedsPlaylistCode(h.activeName()) {
+		return false
+	}
+	_, at, ok, err := h.storedSession()
+	if err != nil || !ok {
+		return false
+	}
+	return !h.now().Before(at.Add(h.sessionWindow))
+}
+
+// nextRevalidateAt reports when the stored code is next due for a re-check,
+// for status to report. ok is false under the same conditions SessionDue
+// documents, so an absent field means "no session to report", never a zero time.
+func (h *SourceHandler) nextRevalidateAt() (time.Time, bool) {
+	if h.sessionWindow <= 0 {
+		return time.Time{}, false
+	}
+	if !source.NeedsPlaylistCode(h.activeName()) {
+		return time.Time{}, false
+	}
+	_, at, ok, err := h.storedSession()
+	if err != nil || !ok {
+		return time.Time{}, false
+	}
+	return at.Add(h.sessionWindow), true
+}
+
+// SessionOutcome is what a revalidation did with the stored credential.
+type SessionOutcome int
+
+const (
+	// SessionNotDue: the code is younger than the window, or there is none to
+	// re-check, so nothing was attempted.
+	SessionNotDue SessionOutcome = iota
+	// SessionConfirmed: AdoboTV recognised the code, so the window was reset.
+	SessionConfirmed
+	// SessionEnded: the code was definitively rejected, so it was cleared and
+	// the live source reopened from what remains.
+	SessionEnded
+	// SessionUnchanged: the re-check was inconclusive — a transient failure that
+	// says nothing about the code — so the credential was left exactly as it was.
+	SessionUnchanged
+)
+
+// String renders the outcome for a log line.
+func (o SessionOutcome) String() string {
+	switch o {
+	case SessionConfirmed:
+		return "confirmed"
+	case SessionEnded:
+		return "ended"
+	case SessionUnchanged:
+		return "unchanged (transient)"
+	default:
+		return "not due"
+	}
+}
+
+// RevalidateSession re-checks an aged stored code against AdoboTV and decides
+// what that means for the session. It is the silent weekly re-check the owner
+// asked for, and it is honest about its name: nothing upstream expires, so this
+// is not a session that times out — it is a re-check that the credential still
+// works.
+//
+// The safety property is absolute: a transient failure must never log the user
+// out. The set of outcomes that *prove a code invalid* is the mirror of the set
+// that proves it valid (playlistCodeProvenValid), and only such a definitive
+// rejection clears the credential. An unreachable AdoboTV, a timeout, a 5xx, an
+// unparseable response, a pending device or a lapsed subscription all leave the
+// stored code exactly where it is, because none of them says anything about
+// whether the code is good. Getting this backwards would silently destroy the
+// user's credential on a network blip, which is worse than any friction the
+// session removes.
+//
+// A code that still works — or one AdoboTV accepted but gated for some other
+// reason — resets the window, so the user never sees the re-check.
+func (h *SourceHandler) RevalidateSession(ctx context.Context) SessionOutcome {
+	if h.sessionWindow <= 0 {
+		return SessionNotDue
+	}
+	if !source.NeedsPlaylistCode(h.activeName()) {
+		return SessionNotDue
+	}
+	code, storedAt, ok, err := h.storedSession()
+	if err != nil {
+		log.Printf("source session: reading the stored code: %v", err)
+		return SessionUnchanged
+	}
+	if !ok {
+		return SessionNotDue
+	}
+	if h.now().Before(storedAt.Add(h.sessionWindow)) {
+		return SessionNotDue
+	}
+
+	candidate, err := h.open(h.configWithCode(code))
+	if err != nil {
+		// The adapter could not even be built, which is a local fault, not a
+		// verdict on the code. Leave the credential alone.
+		log.Printf("source session: reopening %q to re-check the stored code: %v", adobotvhttp.Name, err)
+		return SessionUnchanged
+	}
+
+	validationErr := validatePlaylistCode(candidate)
+	switch {
+	case validationErr == nil, playlistCodeProvenValid(validationErr):
+		// AdoboTV recognised the code. A gate outside the code's control (a
+		// device awaiting approval, a lapsed subscription) still proves the
+		// credential itself good, so the window resets exactly as on a clean
+		// success and the user is not asked to retype anything.
+		return h.confirmSession(code)
+	case playlistCodeProvenInvalid(validationErr):
+		h.endSession()
+		return SessionEnded
+	default:
+		log.Printf("source session: re-checking the stored code: %v (leaving the credential untouched)", validationErr)
+		return SessionUnchanged
+	}
+}
+
+// confirmSession re-Saves the stored code to reset the revalidation window's
+// clock. The code is unchanged; only the file's timestamp moves, which is what
+// the window is measured from. A failed re-Save leaves the previous timestamp
+// in place, so the code is simply re-checked again rather than being trusted
+// longer than intended.
+func (h *SourceHandler) confirmSession(code string) SessionOutcome {
+	if err := h.codes.Save(code); err != nil {
+		log.Printf("source session: resetting the re-check window: %v", err)
+		return SessionUnchanged
+	}
+	log.Printf("[source] the stored playlist code was re-confirmed by AdoboTV; the re-check window has been reset")
+	return SessionConfirmed
+}
+
+// endSession clears a stored code that AdoboTV definitively rejected and
+// reopens the live source from what remains — the environment fallback if one
+// is set, otherwise the adapter with no code. It deliberately mirrors
+// DeletePlaylistCode rather than clearing the remembered mode: the user still
+// wants the login path, they have simply lost its credential, so the next thing
+// they see is the code-entry gate rather than the two-way chooser. It is the one
+// path that ends a session, and it runs only for a rejection that names the code
+// itself. A failure to reopen is logged and leaves the server running whatever
+// it had, rather than half-swapped.
+func (h *SourceHandler) endSession() {
+	if err := h.codes.Clear(); err != nil {
+		log.Printf("source session: clearing the rejected code: %v", err)
+		return
+	}
+	log.Printf("[source] AdoboTV rejected the stored playlist code; the session ended and the code was cleared")
+
+	if h.activeName() != "" && source.NeedsPlaylistCode(h.activeName()) {
+		reopened, err := h.openMode(h.activeName())
+		if err != nil {
+			log.Printf("source session: reopening after a rejected code: %v", err)
+			return
+		}
+		h.player.SwapSource(reopened)
+	}
+}
+
+// SyncNow refreshes the active source's library ahead of use. It is the manual
+// "sync now" path and the mechanism the midnight scheduler calls. A source with
+// no upstream library returns ErrSyncUnsupported rather than a silent success,
+// so the client is told plainly that an imported playlist has nothing to sync.
+func (h *SourceHandler) SyncNow(ctx context.Context) error {
+	src := h.player.src()
+	if src == nil {
+		return source.UnsupportedSyncError("")
+	}
+	provider, ok := src.(source.SyncProvider)
+	if !ok {
+		return source.UnsupportedSyncError(src.Name())
+	}
+	return provider.Refresh(ctx)
+}
+
+// SyncSource refreshes the active source on demand so the user can pull the
+// newest library without waiting for the cache TTL or the midnight warm-up. A
+// failure is a real answer to an explicit request — unlike the background
+// refresh, which is logged and ignored — so it is mapped through the same
+// classifier every other source error uses and its gate code reaches the client.
+func (h *SourceHandler) SyncSource(c *gin.Context) {
+	if err := h.SyncNow(c.Request.Context()); err != nil {
+		writeSourceError(c, err, "")
+		return
+	}
+	c.JSON(http.StatusOK, h.statusBody())
 }
 
 // sourceModeStatus is one entry in status's modes list. The client renders the
@@ -795,4 +1060,24 @@ func playlistCodeProvenValid(err error) bool {
 		// failing upstream said nothing), and anything unknown.
 		return false
 	}
+}
+
+// playlistCodeProvenInvalid reports whether a validation failure definitively
+// proves the submitted code itself invalid — the only outcome that may end a
+// session. This is the mirror of playlistCodeProvenValid during revalidation.
+//
+// It is deliberately NOT written as !playlistCodeProvenValid, because the
+// complement of "proven valid" is "not proven valid", which is a strictly
+// larger set than "proven invalid". A malformed body, a transport failure or an
+// unknown error is not proven valid, but it is also not proven invalid: it says
+// nothing about the code, so it must leave the credential alone. Only a
+// rejection that names the code itself is a verdict. Keeping this an explicit
+// allowlist rather than a negation is what stops a network blip from being
+// mistaken for a bad credential — the failure mode that would silently destroy
+// the user's session.
+func playlistCodeProvenInvalid(err error) bool {
+	// playlist_rejected is /v1/playlist/:code refusing the code outright
+	// (HTTP 401/403). It is the one outcome that identifies the credential, not
+	// the account state, as the problem.
+	return errors.Is(err, adobotvhttp.ErrPlaylistRejected)
 }
