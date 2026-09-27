@@ -27,6 +27,9 @@ func TestNameAndOptionalCapabilities(t *testing.T) {
 	if _, ok := asSource.(source.CompiledEPGProvider); !ok {
 		t.Error("adapter does not implement source.CompiledEPGProvider")
 	}
+	if _, ok := asSource.(source.AccountInfoProvider); !ok {
+		t.Error("adapter does not implement source.AccountInfoProvider: its envelope carries the account facts")
+	}
 	if _, ok := asSource.(source.StreamProbeLister); ok {
 		t.Error("adapter must NOT implement source.StreamProbeLister: it only sees one playlist")
 	}

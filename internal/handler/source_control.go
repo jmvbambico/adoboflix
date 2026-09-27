@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jmvbambico/adoboflix/internal/playlistcode"
@@ -63,13 +64,45 @@ func NewSourceHandler(player *PlayerHandler, store *playlistcode.Store, cfg sour
 // whether one is currently configured. It never returns the code itself. The
 // client uses needs_playlist_code to decide whether to offer the entry form and
 // playlist_code_configured to know whether the source can serve content yet.
+//
+// Two account facts are added when — and only when — the active adapter can
+// supply them AND a credential is configured to fetch them with: the
+// subscription's billing expiry (subscription_expires_at, RFC3339) and the
+// operator's own message (user_message). They are additive and best-effort:
+// a source with no account concept (file, postgres-direct), a missing
+// credential, or an upstream refusal leaves them out and the endpoint still
+// answers 200 with the fields above unchanged. No tier or plan label is ever
+// invented here.
 func (h *SourceHandler) GetStatus(c *gin.Context) {
 	needs, configured := h.state()
-	c.JSON(http.StatusOK, gin.H{
+	body := gin.H{
 		"source":                   h.cfg.Name,
 		"needs_playlist_code":      needs,
 		"playlist_code_configured": configured,
-	})
+	}
+
+	// Only a source that takes a code has anything to fetch account facts with;
+	// without a configured code there is no playlist to read them from.
+	if configured {
+		if provider, ok := h.player.src().(source.AccountInfoProvider); ok {
+			info, err := provider.AccountInfo()
+			if err != nil {
+				// The account facts are a nicety, not part of the contract: a
+				// failure here must not turn the always-answers status endpoint
+				// into an error, so it is logged and the fields are omitted.
+				log.Printf("source status: account info unavailable for %q: %v", h.cfg.Name, err)
+			} else {
+				if info.SubscriptionExpiresAt != nil {
+					body["subscription_expires_at"] = info.SubscriptionExpiresAt.UTC().Format(time.RFC3339)
+				}
+				if msg := strings.TrimSpace(info.UserMessage); msg != "" {
+					body["user_message"] = msg
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, body)
 }
 
 // SetPlaylistCode accepts a playlist code, validates it against AdoboTV with a

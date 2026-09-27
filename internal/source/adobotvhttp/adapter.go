@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -52,12 +53,14 @@ const Name = "adobotv-http"
 // the provider is the platform itself.
 const sourceType = "adobotv"
 
-// The adapter must satisfy the read-only boundary and can supply the compiled
-// EPG bytes. It must NOT satisfy StreamProbeLister; that omission is what
-// keeps the optional capability honest.
+// The adapter must satisfy the read-only boundary, can supply the compiled EPG
+// bytes, and can describe the subscriber's account. It must NOT satisfy
+// StreamProbeLister; that omission is what keeps the optional capability
+// honest.
 var (
 	_ source.Source              = (*Adapter)(nil)
 	_ source.CompiledEPGProvider = (*Adapter)(nil)
+	_ source.AccountInfoProvider = (*Adapter)(nil)
 )
 
 func init() {
@@ -550,6 +553,33 @@ func (a *Adapter) CompiledEPG() ([]byte, string, error) {
 	}
 	sum := sha256.Sum256(body)
 	return body, hex.EncodeToString(sum[:]), nil
+}
+
+// --- account (optional capability) ------------------------------------------
+
+// AccountInfo reports the account facts the playlist envelope carries: the
+// operator's user_message and the subscription's billing expiry. It reads the
+// same cached envelope every other call uses, so it costs no extra upstream
+// request when the cache is warm.
+//
+// billed_till is a string of unix seconds upstream and is absent for
+// non-subscription tiers, so a missing value is the normal case, not an error.
+// A value that is present but not a unix-seconds integer is treated as absent
+// rather than failing the whole call, so a malformed expiry cannot hide a
+// perfectly good user_message.
+func (a *Adapter) AccountInfo() (source.AccountInfo, error) {
+	env, err := a.library(context.Background())
+	if err != nil {
+		return source.AccountInfo{}, err
+	}
+	info := source.AccountInfo{UserMessage: strings.TrimSpace(env.Provider.UserMessage)}
+	if raw := strings.TrimSpace(env.Provider.BilledTill); raw != "" {
+		if secs, err := strconv.ParseInt(raw, 10, 64); err == nil {
+			expiry := time.Unix(secs, 0).UTC()
+			info.SubscriptionExpiresAt = &expiry
+		}
+	}
+	return info, nil
 }
 
 // --- helpers ----------------------------------------------------------------

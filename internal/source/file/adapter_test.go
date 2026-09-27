@@ -26,6 +26,9 @@ func TestNameAndOptionalCapabilities(t *testing.T) {
 	if _, ok := asSource.(source.CompiledEPGProvider); ok {
 		t.Error("adapter must NOT implement source.CompiledEPGProvider: a file carries no XMLTV blob")
 	}
+	if _, ok := asSource.(source.AccountInfoProvider); ok {
+		t.Error("adapter must NOT implement source.AccountInfoProvider: a local playlist has no account")
+	}
 }
 
 func TestRegistryEntry(t *testing.T) {

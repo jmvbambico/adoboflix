@@ -4,7 +4,8 @@
  */
 
 import React from "react";
-import { Heart, Search, User, Compass } from "lucide-react";
+import { Heart, Search, Compass } from "lucide-react";
+import AccountMenu from "./AccountMenu";
 
 interface HeaderProps {
   searchQuery: string;
@@ -84,23 +85,10 @@ export default function Header({
 
           <span className="h-6 w-px bg-white/5 hidden sm:inline" />
 
-          {/* User Profile Shield card */}
-          <div className="flex items-center gap-3.5 pl-2">
-            <div className="flex flex-col items-end text-right hidden lg:flex">
-              <span className="text-xs font-semibold text-slate-100 flex items-center gap-1">
-                Aether Voyager
-                <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
-              </span>
-              <span className="text-[9px] text-orange-500 font-mono tracking-wider font-semibold uppercase">Diamond Elite Premium</span>
-            </div>
-            
-            <div className="relative">
-              <div className="w-9 h-9 rounded-xl bg-slate-800 border border-white/10 overflow-hidden flex items-center justify-center text-slate-300 shadow bg-gradient-to-tr from-orange-600/30 to-indigo-500/30">
-                <User className="w-4 h-4" />
-              </div>
-              <div className="absolute bottom-0 right-0 w-2.5 h-2.5 bg-orange-500 border-2 border-[#050505] rounded-full" />
-            </div>
-          </div>
+          {/* Account menu — the avatar opens the real account control: connect
+              or disconnect a playlist code and read the active source's
+              account facts. */}
+          <AccountMenu />
         </div>
       </div>
     </header>
