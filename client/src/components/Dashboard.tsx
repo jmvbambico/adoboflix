@@ -24,6 +24,7 @@ import MediaCard from "./MediaCard";
 import CustomPlayer from "./CustomPlayer";
 import GlowBackground from "./GlowBackground";
 import SourceStatusPanel from "./SourceStatusPanel";
+import { describeChannelStatus } from "./channelStatus";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
   ChevronDown, ChevronRight, CircleCheck, Film, ListFilter, Users, BookOpen,
@@ -1581,7 +1582,7 @@ export default function Dashboard() {
                                                 {channel.name}
                                               </h4>
                                               <span className="text-[9px] font-mono text-slate-500 truncate">
-                                                {channel.status === "active" ? "Now Playing · HLS Ready" : "Standby · Inactive"}
+                                                {describeChannelStatus(channel.status)}
                                               </span>
                                             </div>
                                           </div>
