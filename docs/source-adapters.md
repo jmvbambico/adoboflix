@@ -559,17 +559,20 @@ All are matched case-insensitively (`s01e02`, `SEASON 1 EPISODE 2`), and
 `Season N Ep M` is accepted too.
 
 - A title with a parseable season/episode becomes an **episode** of a series.
-  The series name is the title with the marker removed and surrounding
-  separators trimmed (`Breaking Bad S01E02` → `Breaking Bad`), and episodes that
-  share a series name and group land under **one** VOD entry, with type `Series`
-  and one shared id.
+  The marker divides the title: the text **before** it, separators trimmed, is
+  the series name, and the text after it is the episode's own title. So
+  `Breaking Bad S01E01 - Pilot` is episode `Pilot` of `Breaking Bad`, and
+  `Breaking Bad S01E02 - Cat's in the Bag` is another episode of the *same*
+  series. Episodes that share a series name and group land under **one** VOD
+  entry, with type `Series` and one shared id; an episode with no trailing text
+  keeps the full title as its name.
 - A VOD-classified entry whose title has **no** parseable season/episode is
   still a VOD row, filed as a `Movie` with a single default `vod_stream` — it is
   never dropped just because the title could not be parsed.
-- When the marker sits at the very start (`1x02 - Pilot`), the series name is
-  simply not in the title; the group name becomes the series name instead. This
-  is the most guess-prone step and will occasionally group two shows together or
-  split one.
+- When the marker sits at the very start (`1x02 - Pilot`) there is no series
+  name in the title, so the group name is used instead. That case, and a
+  series-name collision between two different shows, is the remaining guesswork —
+  the summary log is what makes it visible.
 
 #### What the startup summary reports
 

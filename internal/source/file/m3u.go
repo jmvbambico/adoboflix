@@ -321,24 +321,35 @@ func parseSeasonEpisode(title string) (season, episode int, ok bool) {
 	return 0, 0, false
 }
 
-// seriesTitle is the series name inferred from a titled episode: the title with
-// the season/episode marker removed and surrounding separators trimmed, e.g.
-// "Breaking Bad S01E02" -> "Breaking Bad". It returns "" when the marker sat at
-// the start of the title and left nothing (the common "1x02 - Pilot" shape,
-// where the series name is simply not in the title), leaving the caller to fall
-// back to the group name. This is the most guess-prone step in the classifier
-// and will occasionally group two shows together or split one; the summary log
-// is what makes that visible.
-func seriesTitle(title string) string {
+// splitSeriesTitle splits a titled episode into its series name and the
+// episode's own title, using the season/episode marker as the divider:
+// "Breaking Bad S01E01 - Pilot" -> ("Breaking Bad", "Pilot").
+//
+// The text BEFORE the marker is the series and the text AFTER it is the episode
+// title. Excising the marker and keeping both sides would make
+// "Breaking Bad S01E01 - Pilot" and "Breaking Bad S01E02 - Cat's in the Bag"
+// two different series — and "Series SxxExx - Episode Title" is the trailing
+// shape real playlists use most, so that mistake would split every series into
+// one-episode entries.
+//
+// An empty series name means the marker sat at the very start of the title (the
+// "1x02 - Pilot" shape, where the series name is simply not in the title),
+// leaving the caller to fall back to the group name. Separators adjacent to the
+// marker are trimmed from both halves. This is still the most guess-prone step
+// in the classifier — it can group two shows together when their names collide,
+// or split one when the prefix is missing — and the summary log is what makes
+// that visible.
+func splitSeriesTitle(title string) (seriesName, episodeTitle string) {
 	for _, re := range seasonEpisodePatterns {
 		loc := re.FindStringIndex(title)
 		if loc == nil {
 			continue
 		}
-		name := title[:loc[0]] + " " + title[loc[1]:]
-		return strings.Trim(strings.TrimSpace(name), "-–—_.:| ")
+		before := strings.Trim(strings.TrimSpace(title[:loc[0]]), "-–—_.:| ")
+		after := strings.Trim(strings.TrimSpace(title[loc[1]:]), "-–—_.:| ")
+		return before, after
 	}
-	return strings.TrimSpace(title)
+	return strings.TrimSpace(title), ""
 }
 
 // --- construction -----------------------------------------------------------
@@ -412,9 +423,14 @@ func buildM3ULibrary(entries []m3uEntry, summary *m3uSummary) libraryFile {
 			continue
 		}
 
-		name := seriesTitle(e.title)
+		name, episodeName := splitSeriesTitle(e.title)
 		if name == "" {
 			name = group
+		}
+		if episodeName == "" {
+			// The marker ended the title, so it carries no episode title of its
+			// own; fall back to the full title rather than leaving it blank.
+			episodeName = strings.TrimSpace(e.title)
 		}
 		// Name and group are normalised in the key so "TV Shows" / "tv shows"
 		// and "Breaking Bad" / "breaking  bad" are one series, matching the
@@ -441,7 +457,7 @@ func buildM3ULibrary(entries []m3uEntry, summary *m3uSummary) libraryFile {
 			VodID:         file.Entries[idx].ID,
 			SeasonNumber:  season,
 			EpisodeNumber: episode,
-			Name:          strings.TrimSpace(e.title),
+			Name:          episodeName,
 			StreamURL:     &streamURL,
 			SourceType:    Name,
 		})

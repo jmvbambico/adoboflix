@@ -2,10 +2,13 @@ package file
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/jmvbambico/adoboflix/internal/source"
 )
 
 // The M3U parser is defined by its tolerance as much as by its happy path, so
@@ -232,43 +235,128 @@ func TestM3UVodEntryWithoutSeasonEpisodeIsAMovie(t *testing.T) {
 	}
 }
 
-// Episodes of one series land under a single VOD entry, with one id.
+// Episodes of one series land under a single VOD entry with one id, across every
+// title shape — including the trailing "SxxExx - Episode Title" form real
+// playlists use most. That trailing text belongs on the episode, not on the
+// series: keeping it on the series would give every episode a different series
+// name and split the show into one-episode entries.
 func TestM3UEpisodesOfOneSeriesGroupUnderOneEntry(t *testing.T) {
-	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
-		"#EXTINF:-1 group-title=\"Series\",Breaking Bad S01E01\nhttps://cdn.example/bb/s01e01.mkv\n"+
-		"#EXTINF:-1 group-title=\"Series\",Breaking Bad S01E02\nhttps://cdn.example/bb/s01e02.mkv\n"+
-		"#EXTINF:-1 group-title=\"Series\",Breaking Bad S02E01\nhttps://cdn.example/bb/s02e01.mkv\n")
+	titles := []string{
+		"Breaking Bad S01E01 - Pilot",
+		"Breaking Bad S01E02 - Cat's in the Bag",
+		"Breaking Bad S02E01 - Seven Thirty-Seven",
+		"Breaking Bad 1x04 - Down",
+		"Breaking Bad Season 5 Episode 14 - Ozymandias",
+	}
+
+	var body strings.Builder
+	body.WriteString("#EXTM3U\n")
+	for i, title := range titles {
+		fmt.Fprintf(&body, "#EXTINF:-1 group-title=\"Series\",%s\nhttps://cdn.example/bb/%d.mkv\n", title, i)
+	}
+	adapter := mustRawM3UAdapter(t, body.String())
 
 	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
 	if err != nil {
 		t.Fatalf("GetEntries: %v", err)
 	}
 	if total != 1 || len(entries) != 1 {
-		t.Fatalf("entries = %d (total %d), want one series", len(entries), total)
+		t.Fatalf("entries = %d (total %d), want exactly one series", len(entries), total)
 	}
 	series := entries[0]
+	if series.Name != "Breaking Bad" {
+		t.Fatalf("series name = %q, want %q (no dangling separator or doubled space)", series.Name, "Breaking Bad")
+	}
+	if series.Type != "Series" {
+		t.Errorf("series type = %q, want Series", series.Type)
+	}
 
 	counts, err := adapter.EpisodeCounts([]string{series.ID})
 	if err != nil {
 		t.Fatalf("EpisodeCounts: %v", err)
 	}
-	if counts[series.ID] != 3 {
-		t.Errorf("episode count = %d, want 3", counts[series.ID])
+	if counts[series.ID] != len(titles) {
+		t.Errorf("episode count = %d, want %d", counts[series.ID], len(titles))
 	}
 
 	episodes, err := adapter.GetEpisodes(series.ID)
 	if err != nil {
 		t.Fatalf("GetEpisodes: %v", err)
 	}
-	got := make([]string, 0, len(episodes))
-	for _, ep := range episodes {
-		if ep.VodID != series.ID {
-			t.Errorf("episode %q vod_id = %q, want %q", ep.ID, ep.VodID, series.ID)
-		}
-		got = append(got, "S"+strconv.Itoa(ep.SeasonNumber)+"E"+strconv.Itoa(ep.EpisodeNumber))
+	if len(episodes) != len(titles) {
+		t.Fatalf("episodes = %d, want %d", len(episodes), len(titles))
 	}
-	if want := []string{"S1E1", "S1E2", "S2E1"}; !reflect.DeepEqual(got, want) {
+	got := map[string]string{}
+	for _, ep := range episodes {
+		key := strconv.Itoa(ep.SeasonNumber) + "x" + strconv.Itoa(ep.EpisodeNumber)
+		if _, dup := got[key]; dup {
+			t.Errorf("duplicate episode %s", key)
+		}
+		got[key] = ep.Name
+		if ep.VodID != series.ID {
+			t.Errorf("episode %s vod_id = %q, want %q", key, ep.VodID, series.ID)
+		}
+	}
+	want := map[string]string{
+		"1x1":  "Pilot",
+		"1x2":  "Cat's in the Bag",
+		"2x1":  "Seven Thirty-Seven",
+		"1x4":  "Down",
+		"5x14": "Ozymandias",
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("episodes = %v, want %v", got, want)
+	}
+}
+
+// A trailing-title entry with no series prefix ("1x02 - Pilot") has no series
+// name in its title at all, so it falls back to the group name rather than
+// becoming a series called "Pilot".
+func TestM3UTrailingTitleWithNoSeriesPrefixFallsBackToGroup(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 group-title=\"Series\",1x02 - Pilot\nhttps://cdn.example/p.mkv\n")
+
+	entries, total, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("entries = %d, want 1", total)
+	}
+	if entries[0].Name != "Series" {
+		t.Errorf("series name = %q, want the group name %q", entries[0].Name, "Series")
+	}
+	episodes, err := adapter.GetEpisodes(entries[0].ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(episodes) != 1 {
+		t.Fatalf("episodes = %d, want 1", len(episodes))
+	}
+	if episodes[0].Name != "Pilot" {
+		t.Errorf("episode name = %q, want Pilot", episodes[0].Name)
+	}
+	if episodes[0].SeasonNumber != 1 || episodes[0].EpisodeNumber != 2 {
+		t.Errorf("episode = S%dE%d, want S1E2", episodes[0].SeasonNumber, episodes[0].EpisodeNumber)
+	}
+}
+
+// An episode title with no trailing text keeps the full title rather than an
+// empty name.
+func TestM3UEpisodeWithNoTrailingTextKeepsFullTitle(t *testing.T) {
+	adapter := mustRawM3UAdapter(t, "#EXTM3U\n"+
+		"#EXTINF:-1 group-title=\"Series\",Breaking Bad S01E01\nhttps://cdn.example/bb.mkv\n")
+
+	entries, _, err := adapter.GetEntries("", "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("GetEntries: %v", err)
+	}
+	episodes, err := adapter.GetEpisodes(entries[0].ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(episodes) != 1 || episodes[0].Name != "Breaking Bad S01E01" {
+		t.Fatalf("episodes = %+v, want one named the full title", episodes)
 	}
 }
 
@@ -298,16 +386,16 @@ func TestM3UClassificationSummary(t *testing.T) {
 		t.Errorf("entries = %v, want %v", entryNames(entries), want)
 	}
 	// The two case/whitespace-variant episodes are one series with two episodes.
-	for _, e := range entries {
-		if e.Name == "Breaking Bad" {
-			episodes, err := adapter.GetEpisodes(e.ID)
-			if err != nil {
-				t.Fatalf("GetEpisodes: %v", err)
-			}
-			if len(episodes) != 2 {
-				t.Errorf("Breaking Bad episodes = %d, want 2", len(episodes))
-			}
-		}
+	series, found := findEntry(entries, "Breaking Bad")
+	if !found {
+		t.Fatalf("no entry named %q; entries = %v", "Breaking Bad", entryNames(entries))
+	}
+	episodes, err := adapter.GetEpisodes(series.ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Errorf("Breaking Bad episodes = %d, want 2", len(episodes))
 	}
 
 	if adapter.summary == nil {
@@ -422,8 +510,11 @@ func TestM3UDerivedIDsAreStableAcrossReloads(t *testing.T) {
 	first := mustRawM3UAdapter(t, playlist)
 	second := mustRawM3UAdapter(t, playlist)
 
-	channelsA, _, _ := first.ListChannels("", 10, 0)
+	channelsA, chTotal, _ := first.ListChannels("", 10, 0)
 	channelsB, _, _ := second.ListChannels("", 10, 0)
+	if chTotal != 1 || len(channelsB) != 1 {
+		t.Fatalf("channels = %d/%d, want 1 each", chTotal, len(channelsB))
+	}
 	if channelsA[0].ID != channelsB[0].ID {
 		t.Errorf("channel id changed across reloads: %q != %q", channelsA[0].ID, channelsB[0].ID)
 	}
@@ -431,8 +522,11 @@ func TestM3UDerivedIDsAreStableAcrossReloads(t *testing.T) {
 		t.Errorf("channel id %q lacks the ch- prefix", channelsA[0].ID)
 	}
 
-	entriesA, _, _ := first.GetEntries("", "", "", 1, 10)
+	entriesA, entryTotal, _ := first.GetEntries("", "", "", 1, 10)
 	entriesB, _, _ := second.GetEntries("", "", "", 1, 10)
+	if entryTotal != 2 || len(entriesB) != 2 {
+		t.Fatalf("entries = %d/%d, want 2 each (a movie and a series)", entryTotal, len(entriesB))
+	}
 	for i := range entriesA {
 		if entriesA[i].ID != entriesB[i].ID {
 			t.Errorf("entry %q id changed across reloads: %q != %q",
@@ -446,6 +540,7 @@ func TestM3UDerivedIDsAreStableAcrossReloads(t *testing.T) {
 	if _, err := first.GetChannel(channelsA[0].ID); err != nil {
 		t.Errorf("GetChannel(derived): %v", err)
 	}
+	episodeCount := 0
 	for _, e := range entriesA {
 		entry, err := first.GetEntry(e.ID)
 		if err != nil {
@@ -455,11 +550,15 @@ func TestM3UDerivedIDsAreStableAcrossReloads(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GetEpisodes: %v", err)
 		}
+		episodeCount += len(episodes)
 		for _, ep := range episodes {
 			if _, err := first.GetEpisode(ep.ID); err != nil {
 				t.Errorf("GetEpisode(derived %q): %v", ep.ID, err)
 			}
 		}
+	}
+	if episodeCount == 0 {
+		t.Error("no episodes round-tripped; the fixture must contain at least one")
 	}
 }
 
@@ -503,20 +602,19 @@ func TestM3UDistinctRowsAreNotDiscarded(t *testing.T) {
 	}
 
 	// The identical episodes of the one series both survive.
-	for _, e := range entries {
-		if e.Type != "Series" {
-			continue
-		}
-		episodes, err := adapter.GetEpisodes(e.ID)
-		if err != nil {
-			t.Fatalf("GetEpisodes: %v", err)
-		}
-		if len(episodes) != 2 {
-			t.Errorf("identical episodes = %d, want 2", len(episodes))
-		}
-		if episodes[0].ID == episodes[1].ID {
-			t.Errorf("identical episodes share id %q", episodes[0].ID)
-		}
+	series, found := findEntry(entries, "Breaking Bad")
+	if !found || series.Type != "Series" {
+		t.Fatalf("no Series entry named Breaking Bad; entries = %v", entryNames(entries))
+	}
+	episodes, err := adapter.GetEpisodes(series.ID)
+	if err != nil {
+		t.Fatalf("GetEpisodes: %v", err)
+	}
+	if len(episodes) != 2 {
+		t.Errorf("identical episodes = %d, want 2", len(episodes))
+	}
+	if episodes[0].ID == episodes[1].ID {
+		t.Errorf("identical episodes share id %q", episodes[0].ID)
 	}
 }
 
@@ -572,4 +670,17 @@ func TestM3ULeavesJSONPathIntact(t *testing.T) {
 	if stream.ID != "s" {
 		t.Errorf("resolved stream = %q, want s", stream.ID)
 	}
+}
+
+// findEntry returns the entry with the given name and whether one was found.
+// Tests assert on the found flag before asserting about the entry, so an
+// assertion about a missing entry fails loudly instead of passing vacuously
+// because the loop body never ran.
+func findEntry(entries []source.Entry, name string) (source.Entry, bool) {
+	for _, e := range entries {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return source.Entry{}, false
 }
