@@ -72,9 +72,11 @@ const minBilledTill = 1546300800 // 2019-01-01T00:00:00Z
 // StreamProbeLister; that omission is what keeps the optional capability
 // honest.
 var (
-	_ source.Source              = (*Adapter)(nil)
-	_ source.CompiledEPGProvider = (*Adapter)(nil)
-	_ source.AccountInfoProvider = (*Adapter)(nil)
+	_ source.Source               = (*Adapter)(nil)
+	_ source.CompiledEPGProvider  = (*Adapter)(nil)
+	_ source.AccountInfoProvider  = (*Adapter)(nil)
+	_ source.SyncProvider         = (*Adapter)(nil)
+	_ source.ContextChannelLister = (*Adapter)(nil)
 )
 
 func init() {
@@ -218,6 +220,58 @@ func (a *Adapter) invalidateCache() {
 	a.vod = nil
 	a.vodAt = time.Time{}
 	a.mu.Unlock()
+}
+
+// --- sync (optional capability) ---------------------------------------------
+
+// Refresh re-fetches the playlist envelope and VOD library from upstream now,
+// so the next read is warm, and records the fetch time. It is the optional
+// source.SyncProvider capability; an adapter with no upstream library does not
+// implement it.
+//
+// It fetches into locals and swaps the cache only once both fetches succeed, so
+// a failed refresh leaves the library the caller is already serving from
+// untouched. A refresh is a convenience ahead of use, not a reason to drop a
+// good cache on a network blip — the next normal read is still the source of
+// truth. It holds fetchMu so it serialises with the read path instead of racing
+// a concurrent miss.
+func (a *Adapter) Refresh(ctx context.Context) error {
+	a.fetchMu.Lock()
+	defer a.fetchMu.Unlock()
+
+	env, err := a.fetchEnvelope(ctx)
+	if err != nil {
+		return err
+	}
+	assets, err := a.fetchVODLibrary(ctx, env)
+	if err != nil {
+		return err
+	}
+	if assets == nil {
+		assets = []vodAsset{}
+	}
+
+	now := a.now()
+	a.mu.Lock()
+	a.env = env
+	a.envAt = now
+	a.vod = assets
+	a.vodAt = now
+	a.mu.Unlock()
+	return nil
+}
+
+// LastSyncedAt reports when the playlist envelope was last fetched from
+// upstream, from the timestamp the cache already records. It reads cached state
+// only and never triggers a fetch, so the status endpoint can report it without
+// touching the network. ok is false before anything has been fetched.
+func (a *Adapter) LastSyncedAt() (time.Time, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.env == nil || a.envAt.IsZero() {
+		return time.Time{}, false
+	}
+	return a.envAt, true
 }
 
 // --- VOD (Source) -----------------------------------------------------------
@@ -438,7 +492,19 @@ func (a *Adapter) channels(ctx context.Context) ([]channelView, error) {
 }
 
 func (a *Adapter) ListChannels(category string, limit, offset int) ([]source.Channel, int, error) {
-	views, err := a.channels(context.Background())
+	return a.listChannels(context.Background(), category, limit, offset)
+}
+
+// ListChannelsContext is ListChannels with a caller's context, so the fetch it
+// may trigger is cancelled when the context is. It is the optional
+// source.ContextChannelLister capability, used by the boot credential re-check
+// so a shutdown does not wait out an unreachable upstream's HTTP timeout.
+func (a *Adapter) ListChannelsContext(ctx context.Context, category string, limit, offset int) ([]source.Channel, int, error) {
+	return a.listChannels(ctx, category, limit, offset)
+}
+
+func (a *Adapter) listChannels(ctx context.Context, category string, limit, offset int) ([]source.Channel, int, error) {
+	views, err := a.channels(ctx)
 	if err != nil {
 		return nil, 0, err
 	}

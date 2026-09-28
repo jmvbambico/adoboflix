@@ -341,6 +341,8 @@ GET    /api/v1/source/status
        "playlist_code_configured": bool,
        "playlist_file_configured": bool,
        "playlist_imported_at": "RFC3339",   # only when imported here; omitted otherwise
+       "last_synced_at": "RFC3339",         # only for a source that syncs and has fetched; omitted otherwise
+       "playlist_revalidate_at": "RFC3339", # only with a stored code; omitted otherwise
        "modes": [ { "name", "selectable", "dev",
                     "active", "configured", "needs_playlist_code" } ] }
        # never the code, and the account facts when the adapter can supply them
@@ -349,6 +351,7 @@ POST   /api/v1/source/playlist-code    {"code": "..."}
 DELETE /api/v1/source/playlist-code
 POST   /api/v1/source/playlist-file    <the playlist content: JSON or M3U>
 DELETE /api/v1/source/playlist-file
+POST   /api/v1/source/sync
 ```
 
 `status` is what the menu renders from, so the client never has to hardcode
@@ -357,7 +360,8 @@ what to offer (`selectable`, `dev`) and whether it is ready to open
 (`configured`). `origin` says whether the active source came from the
 environment override or a stored choice, so the UI knows when the choice is not
 its to make. It stays fast, local and cancellable: the account facts are read
-from cache only, never fetched.
+from cache only, never fetched, and so is `last_synced_at` — a last-sync
+timestamp is a local fact, and reading it must not touch the network.
 
 `POST` **validates before persisting**: it opens a candidate adapter and makes
 one cheap real call — the playlist envelope — so a wrong code fails here rather
@@ -446,6 +450,69 @@ Only success and the `device_pending`, `subscription_inactive`,
 current validation call (a single playlist-envelope fetch). The rest are
 classified anyway so the rule is complete and survives a change to what
 validation exercises.
+
+### The session re-check — the same rule, read from the other side
+
+A stored playlist code is trusted for a window (`ADOBOFLIX_PLAYLIST_REVALIDATE_INTERVAL`,
+default `168h`); when it lapses, the next boot re-checks the code against
+AdoboTV by re-running the same single-envelope validation. This is where the
+name matters: **it is a re-check that the credential still works, not a session
+that expires.** Nothing upstream expires — `users.playlist_code` has no expiry
+column, and AdoboTV's playlist path has no cookie or session — so there is no
+clock to honour but the user's trust in what is stored locally.
+
+The rule above is the same rule, read from the other side. "Which failures keep
+the code" decides whether a submitted code is written; the re-check decides
+whether a stored code is *cleared*, and clearing is the dangerous direction. The
+set of outcomes that prove a code **invalid** is the mirror of the set that
+proves it valid, and the two are not complements:
+
+| Re-check outcome | Session | Why |
+|---|---|---|
+| the code works | kept, window reset | — |
+| `device_pending`, `subscription_inactive`, `playlist_format_m3u`, `content_token_rejected`, `content_not_found` | kept, window reset | AdoboTV recognised the code; the gate is outside it, so the credential is proven good |
+| `playlist_rejected` | **ended** — the code is cleared and the source reopened | the code itself was refused; this is the one definitive rejection |
+| `user_agent_rejected`, `malformed_*`, `upstream_error`, a timeout, a dead network, anything unknown | kept, untouched | inconclusive: these say nothing about the code, and `user_agent_rejected` is ambiguous about gate order |
+
+`playlistCodeProvenInvalid` is therefore an explicit allowlist, **not**
+`!playlistCodeProvenValid`. "Not proven valid" (a malformed body, a transport
+failure) is a strictly larger set than "proven invalid", and treating the two as
+one would clear a perfectly good credential on a network blip. The window is
+measured from the stored code file's own mtime, and a re-check that keeps the
+code re-Saves it to move that mtime forward — only the timestamp changes, never
+the code. An environment-supplied code (`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE`) has
+no file and so no session: it is operator configuration, not the user's
+credential to re-check.
+
+### Sync — a daily warm-up, plus an on-demand refresh
+
+The envelope and VOD library are cached for `ADOBOFLIX_ADOBOTV_CACHE_TTL`
+(default `5m`) and refetched when stale. Boot needs no separate mechanism: a
+cold cache fetches on the first read. `adobotv-http` additionally implements the
+optional `source.SyncProvider` capability — `Refresh(ctx)` re-fetches now and
+`LastSyncedAt()` reports when it last did — and the server uses it two ways:
+
+- **A daily refresh**, on the first local-calendar-date change observed after
+  boot, so the first page load of the day is warm. It deliberately does not arm
+  a timer for midnight: this runs on a machine that sleeps, and a long
+  `time.Timer` is not a reliable wall-clock alarm across suspend. `internal/autosync`
+  re-checks the date on a short interval instead, so a laptop that wakes at
+  09:00 refreshes then rather than skipping the day. A failed refresh is logged
+  and ignored — the cache is left as it was and the next read refreshes on the
+  TTL — so it is never an error state for the app.
+- **`POST /api/v1/source/sync`**, a manual refresh. Unlike the background
+  refresh this answers a request the user made, so a failure is reported with
+  the same gate code the rest of the API uses. A source with nothing to sync
+  (an imported playlist) answers `501 sync_unsupported`.
+
+`Refresh` fetches into locals and swaps the cache only once both fetches
+succeed, so a failed refresh cannot evict a good cache. `LastSyncedAt` is a
+local fact read from the cache and never touches the network, which is what lets
+`status` report `last_synced_at` without undoing the cache-only fix there.
+`status` also carries `playlist_revalidate_at` when a stored code exists, so the
+UI can say when the next re-check is due; both are omitted — never sent as a
+zero time — when they do not apply, and the client renders nothing for a missing
+value.
 
 ### Known limits
 

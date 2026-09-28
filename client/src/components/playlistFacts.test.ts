@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { describePlaylistContents, formatImportedAt } from "./playlistFacts";
+import {
+  describePlaylistContents,
+  formatImportedAt,
+  formatLastSynced,
+  formatRevalidateAt,
+  parseRfc3339Instant,
+} from "./playlistFacts";
 
 describe("describePlaylistContents", () => {
   it("names channels when the playlist holds channels", () => {
@@ -69,5 +75,60 @@ describe("formatImportedAt", () => {
     ["a space-separated datetime", "2026-03-12 09:30:00"],
   ])("renders nothing for %s", (_label, value) => {
     expect(formatImportedAt(value)).toBeNull();
+  });
+});
+
+// The same guard backs every status timestamp, so the sync formatters render
+// nothing for the same set of bad values — a missing or zero time must never
+// become an epoch date.
+const BAD_INSTANTS: Array<[string, string | undefined]> = [
+  ["undefined", undefined],
+  ["empty", ""],
+  ["unparseable", "not-a-date"],
+  ["the epoch itself", "1970-01-01T00:00:00Z"],
+  ["Go's zero time", "0001-01-01T00:00:00Z"],
+  ["a bare-year sentinel", "0"],
+  ["a date with no time", "2000-01-01"],
+];
+
+describe("parseRfc3339Instant", () => {
+  it("returns the instant for a valid RFC3339 value", () => {
+    const date = parseRfc3339Instant("2026-03-12T09:30:00Z");
+    expect(date).not.toBeNull();
+    expect(date?.toISOString()).toBe("2026-03-12T09:30:00.000Z");
+  });
+
+  it.each(BAD_INSTANTS)("returns null for %s", (_label, value) => {
+    expect(parseRfc3339Instant(value)).toBeNull();
+  });
+});
+
+describe("formatLastSynced", () => {
+  it("renders a past sync as a readable date, not the raw timestamp", () => {
+    const text = formatLastSynced("2026-03-12T09:30:00Z");
+    expect(text).toMatch(/^Synced /);
+    expect(text).toContain("2026");
+    expect(text).not.toContain("2026-03-12T09:30:00Z");
+  });
+
+  it("renders today's sync as today, with a time", () => {
+    expect(formatLastSynced(new Date().toISOString())).toMatch(/^Synced today at /);
+  });
+
+  it.each(BAD_INSTANTS)("renders nothing for %s", (_label, value) => {
+    expect(formatLastSynced(value)).toBeNull();
+  });
+});
+
+describe("formatRevalidateAt", () => {
+  it("names the next check as a date, not the raw timestamp", () => {
+    const text = formatRevalidateAt("2026-03-12T09:30:00Z");
+    expect(text).toMatch(/^Next check /);
+    expect(text).toContain("2026");
+    expect(text).not.toContain("2026-03-12T09:30:00Z");
+  });
+
+  it.each(BAD_INSTANTS)("renders nothing for %s", (_label, value) => {
+    expect(formatRevalidateAt(value)).toBeNull();
   });
 });

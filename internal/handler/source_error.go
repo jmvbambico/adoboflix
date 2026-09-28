@@ -51,6 +51,11 @@ const (
 	// codePlaylistTooLarge is the import endpoint's rejection when the upload
 	// exceeds the request body cap.
 	codePlaylistTooLarge = "playlist_too_large"
+	// codeSyncUnsupported is the sync endpoint's answer when the active source
+	// has no upstream library to refresh — an imported playlist is a snapshot the
+	// user re-imports. It is not a failure of the request, so the client can
+	// simply not offer sync where it is absent rather than showing an error.
+	codeSyncUnsupported = "sync_unsupported"
 )
 
 // sourceErrorStatus maps an error returned by the active source to the HTTP
@@ -88,6 +93,10 @@ const (
 // option for now and is flagged in the change report.
 func sourceErrorStatus(err error) (int, string) {
 	switch {
+	case errors.Is(err, source.ErrSyncUnsupported):
+		// The source has no upstream library to refresh. Not Implemented: the
+		// request was understood and is simply not applicable to this source.
+		return http.StatusNotImplemented, codeSyncUnsupported
 	case errors.Is(err, source.ErrNotConfigured):
 		// No source has been chosen yet. 409: the request conflicts with the
 		// current state and a human must pick a mode before it can succeed. Not

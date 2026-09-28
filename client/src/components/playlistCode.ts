@@ -10,6 +10,7 @@ import {
   fetchSourceStatus,
   isApiError,
   setPlaylistCode,
+  syncSource,
   type SourceStatus,
 } from "../api/client";
 import { describeSourceError, type SourceStatusCopy } from "./sourceStatus";
@@ -138,4 +139,20 @@ export function usePlaylistCodeController() {
   );
 
   return { statusQuery, submit, clear, submitCode, outcome, setOutcome };
+}
+
+// useSourceSync owns the manual "Sync now" action. It is separate from the
+// playlist-code controller because it is only meaningful for an upstream-backed
+// source, and the account menu mounts it only where the server reports that
+// source. The reply is the new status, so it is written straight into the
+// shared cache and the last-synced line updates without a second read.
+export function useSourceSync() {
+  const queryClient = useQueryClient();
+  const sync = useMutation<SourceStatus, unknown, void>({
+    mutationFn: syncSource,
+    onSuccess: (status) => {
+      queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, status);
+    },
+  });
+  return { sync, syncError: sync.isError ? describeSourceError(sync.error) : null };
 }

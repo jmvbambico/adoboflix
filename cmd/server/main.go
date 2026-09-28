@@ -10,10 +10,13 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/jmvbambico/adoboflix/internal/autosync"
 	"github.com/jmvbambico/adoboflix/internal/db"
 	"github.com/jmvbambico/adoboflix/internal/epg"
 	"github.com/jmvbambico/adoboflix/internal/handler"
@@ -173,6 +176,20 @@ func main() {
 		log.Printf("[EPG] source %q does not provide EPG data; the EPG endpoint will report it as unavailable", sourceName)
 	}
 
+	// How long a stored playlist code is trusted before it is re-checked against
+	// AdoboTV. One week by default; "0" disables the re-check. A malformed value
+	// is reported and the default used rather than refusing to boot: it is an
+	// optional tuning key, and a typo should not take the player down.
+	sessionWindow := handler.DefaultSessionWindow
+	if raw := strings.TrimSpace(os.Getenv(handler.EnvSessionWindow)); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil {
+			sessionWindow = d
+		} else {
+			log.Printf("[source] ignoring invalid %s=%q (want a Go duration like 168h); using %s",
+				handler.EnvSessionWindow, raw, handler.DefaultSessionWindow)
+		}
+	}
+
 	// The source endpoints share the player's source so a swap takes effect for
 	// every content route at once. The handler resolves the credential and the
 	// playlist path itself on each call, so it is handed the configuration with
@@ -190,6 +207,7 @@ func main() {
 		EnvPlaylistCode: envPlaylistCode,
 		EnvFilePath:     envFilePath,
 		EnvSource:       envSource,
+		SessionWindow:   sessionWindow,
 	})
 
 	// API routes
@@ -227,6 +245,9 @@ func main() {
 		api.DELETE("/source/playlist-code", sourceHandler.DeletePlaylistCode)
 		api.POST("/source/playlist-file", sourceHandler.SetPlaylistFile)
 		api.DELETE("/source/playlist-file", sourceHandler.DeletePlaylistFile)
+		// A manual refresh of the active source's library, so the user can pull
+		// the newest content without waiting for the cache TTL.
+		api.POST("/source/sync", sourceHandler.SyncSource)
 	}
 
 	// Serve built client assets.
@@ -268,6 +289,42 @@ func main() {
 		}
 	}()
 
+	// Background housekeeping, both tied to one cancellable context and one
+	// WaitGroup so shutdown can stop them and wait for them to exit rather than
+	// leaking a goroutine.
+	bgCtx, cancelBG := context.WithCancel(context.Background())
+	defer cancelBG()
+	var bgWG sync.WaitGroup
+
+	// The weekly re-check of a stored credential. It runs off the boot path so
+	// a slow or unreachable AdoboTV cannot delay startup, and it does nothing at
+	// all unless the stored code is actually due. Every outcome that is not a
+	// definitive rejection leaves the credential untouched; see
+	// SourceHandler.RevalidateSession.
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		if outcome := sourceHandler.RevalidateSession(bgCtx); outcome != handler.SessionNotDue {
+			log.Printf("[source] session re-check: %s", outcome)
+		}
+	}()
+
+	// The daily warm-up: when the calendar date changes, refresh the active
+	// source so the first page load of the day is served from a warm cache. A
+	// failure is logged and ignored — it is not an error state for the app.
+	// Supported gates the attempt on the source actually having something to
+	// sync, so an imported playlist or a sourceless server is not asked (and not
+	// logged as failing) once a day for a state that is entirely normal.
+	scheduler := autosync.New(time.Now, func(syncCtx context.Context) error {
+		return sourceHandler.SyncNow(syncCtx)
+	})
+	scheduler.Supported = sourceHandler.CanSync
+	bgWG.Add(1)
+	go func() {
+		defer bgWG.Done()
+		scheduler.Run(bgCtx)
+	}()
+
 	<-ctx.Done()
 	log.Printf("[shutdown] signal received, stopping")
 
@@ -275,11 +332,19 @@ func main() {
 	// when no scan was ever requested — it never constructs the scan manager.
 	handler.CancelActiveScan()
 
+	// Stop both background jobs and wait for them, so no goroutine outlives the
+	// process. Cancelling bgCtx reaches the re-check's upstream read through the
+	// context threaded into validatePlaylistCode, so an in-flight boot re-check
+	// against an unreachable AdoboTV is aborted rather than waited out; the
+	// scheduler returns from its select. bgWG.Wait() therefore returns promptly.
+	cancelBG()
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Printf("[shutdown] http server: %v", err)
 	}
+	bgWG.Wait()
 }
 
 // openBootSource opens the source the server boots with, applying the policy

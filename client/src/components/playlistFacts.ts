@@ -35,22 +35,58 @@ export function describePlaylistContents(
 // assumed.
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
+// parseRfc3339Instant is the one guard every status timestamp goes through. It
+// returns the instant for a valid RFC3339 value and null for a missing,
+// non-ISO, unparseable, zero or pre-epoch one, so absence is never rendered as
+// an epoch date (the billed_till lesson). The formatters below share it rather
+// than repeating a slightly different check.
+export function parseRfc3339Instant(iso: string | undefined): Date | null {
+  if (!iso || !RFC3339.test(iso)) return null;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return null;
+  return date;
+}
+
+// formatDay renders a date as a readable day, no time.
+function formatDay(date: Date): string {
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
 // formatImportedAt turns the RFC3339 import time into something readable at a
 // glance. A missing, non-ISO, unparseable, zero or pre-epoch value renders as
 // nothing: absence must never become an epoch date (the billed_till lesson).
 export function formatImportedAt(iso: string | undefined): string | null {
-  if (!iso || !RFC3339.test(iso)) return null;
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return null;
+  const date = parseRfc3339Instant(iso);
+  if (!date) return null;
 
   const now = new Date();
   if (date.toDateString() === now.toDateString()) {
     const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     return `Imported today at ${time}`;
   }
-  return `Imported ${date.toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  })}`;
+  return `Imported ${formatDay(date)}`;
+}
+
+// formatLastSynced turns the RFC3339 last-sync time into something readable.
+// The same guard applies: a missing/zero/unparseable value renders as nothing,
+// so a source that has never synced shows no line rather than an epoch date.
+export function formatLastSynced(iso: string | undefined): string | null {
+  const date = parseRfc3339Instant(iso);
+  if (!date) return null;
+
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    return `Synced today at ${time}`;
+  }
+  return `Synced ${formatDay(date)}`;
+}
+
+// formatRevalidateAt renders when the stored playlist code will next be
+// re-checked against AdoboTV: a weekly look at whether it still works, not an
+// expiry. Same guard — an absent/zero value renders nothing.
+export function formatRevalidateAt(iso: string | undefined): string | null {
+  const date = parseRfc3339Instant(iso);
+  if (!date) return null;
+  return `Next check ${formatDay(date)}`;
 }

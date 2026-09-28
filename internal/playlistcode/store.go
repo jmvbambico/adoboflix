@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // EnvPlaylistCodeFile names the environment variable that overrides where the
@@ -94,6 +95,24 @@ func (s *Store) Load() (code string, ok bool, err error) {
 		return "", false, fmt.Errorf("%w: %s exists but is empty", ErrEmptyCode, s.path)
 	}
 	return code, true, nil
+}
+
+// ModTime returns the stored code file's modification time — for this store,
+// when the credential was last written, which is when the user entered it or
+// when it was last reconfirmed. ok is false when no code is stored or the file
+// cannot be stat-ed; callers report that by omitting a timestamp rather than
+// sending a zero time. It is the "session clock": the weekly revalidation
+// window is measured from it, and a successful revalidation re-Saves the same
+// code to reset it.
+func (s *Store) ModTime() (time.Time, bool) {
+	if s.path == "" {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(s.path)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
 }
 
 // Save writes code to the store atomically and mode 0600: a temp file in the

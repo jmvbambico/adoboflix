@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -218,6 +219,58 @@ func TestEmptyPathStoreIsInert(t *testing.T) {
 	}
 	if err := store.Clear(); err != nil {
 		t.Fatalf("Clear = %v, want nil", err)
+	}
+}
+
+// ModTime is the session clock: absent when nothing is stored, and moved
+// forward by a re-Save of the same code, which is how a revalidation resets the
+// window. The test ages the file explicitly rather than sleeping, so the
+// before/after difference is produced by Save and not by wall-clock drift.
+func TestModTimeReportsStoredCodeAndMovesOnReSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "playlist-code")
+	store := New(path)
+
+	if _, ok := store.ModTime(); ok {
+		t.Fatal("ModTime on an absent store = ok, want false")
+	}
+
+	if err := store.Save("CODE-A"); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	aged := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(path, aged, aged); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	before, ok := store.ModTime()
+	if !ok {
+		t.Fatal("ModTime after Save = not ok, want ok")
+	}
+	if before.Sub(aged).Abs() > time.Second {
+		t.Fatalf("ModTime = %v, want the aged file time %v", before, aged)
+	}
+
+	// Re-saving the SAME code is the revalidation reset; only the timestamp
+	// should move.
+	if err := store.Save("CODE-A"); err != nil {
+		t.Fatalf("re-Save: %v", err)
+	}
+	after, ok := store.ModTime()
+	if !ok {
+		t.Fatal("ModTime after re-Save = not ok, want ok")
+	}
+	if !after.After(before) {
+		t.Fatalf("ModTime after re-Save = %v, want it later than %v", after, before)
+	}
+	code, ok, err := store.Load()
+	if err != nil || !ok || code != "CODE-A" {
+		t.Fatalf("Load after re-Save = (%q, %v, %v), want the unchanged code", code, ok, err)
+	}
+
+	if err := store.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, ok := store.ModTime(); ok {
+		t.Fatal("ModTime after Clear = ok, want false")
 	}
 }
 
