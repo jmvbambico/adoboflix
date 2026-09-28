@@ -18,6 +18,17 @@ import "context"
 // for the sake of one caller. Callers that hold a context and a Source
 // type-assert for this capability and fall back to ListChannels when it is
 // absent, so a non-network adapter (a local file, a test stub) is unaffected.
+//
+// # A network-backed adapter should implement this
+//
+// Anything that reaches the network should implement ContextChannelLister.
+// Nothing enforces it — adoption is per-adapter and there is no lint or test
+// that catches an omission — and what is lost by skipping it is concrete: the
+// call falls back to Source.ListChannels with context.Background(), so a boot
+// credential re-check against an unreachable upstream cannot be cancelled and a
+// shutdown waits out that adapter's HTTP timeout (adobotv-http's DefaultTimeout,
+// 30s) before the process can exit. An adapter that reads only local state has
+// nothing to cancel and correctly does not implement this.
 type ContextChannelLister interface {
 	// ListChannelsContext is ListChannels with the caller's context, so the
 	// underlying read is cancelled when the context is. It is read-only.

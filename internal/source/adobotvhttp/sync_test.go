@@ -197,7 +197,13 @@ func TestListChannelsContextCancelsInFlightFetch(t *testing.T) {
 		errCh <- err
 	}()
 
-	<-arrived
+	// Bounded: if the request never reaches the server this fails crisply rather
+	// than hanging the package until the test timeout.
+	select {
+	case <-arrived:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the fetch never reached the server")
+	}
 	cancel()
 
 	select {

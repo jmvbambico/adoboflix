@@ -3,8 +3,6 @@ package autosync
 import (
 	"context"
 	"errors"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -149,34 +147,19 @@ func TestMaybeSyncDoesNotAskASourceThatCannotSync(t *testing.T) {
 	}
 }
 
-// RunTicks is the wiring that makes the daily refresh actually happen: a tick
-// that observes a date change must sync, and a tick on the same date must not.
-// The loop is driven by an explicit tick channel and an injected clock, so
-// nothing waits on real time; only the two waits below are deadlines, not
-// sleeps that the behaviour depends on.
-func TestRunTicksSyncsWhenTheDateChanges(t *testing.T) {
-	start := time.Date(2026, 9, 27, 23, 59, 0, 0, time.UTC)
-	// The clock is read by the RunTicks goroutine and written here, so it is
-	// guarded: the loop's date check and the test's advance must not race.
-	var mu sync.Mutex
-	now := start
-	setNow := func(at time.Time) {
-		mu.Lock()
-		now = at
-		mu.Unlock()
-	}
-	synced := make(chan struct{}, 4)
-	var calls atomic.Int32
-	s := New(func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		return now
-	}, func(context.Context) error {
-		calls.Add(1)
-		synced <- struct{}{}
-		return nil
-	})
-
+// runOneTick drives a scheduler through exactly ONE tick and waits for the loop
+// to drain it and return. The channel close plus <-done is a real barrier: when
+// it returns, the loop has processed the tick, so the caller observes final
+// state rather than racing the tick.
+//
+// The two tests below each drive a single tick on purpose. A combined
+// test — one tick on the seeded date, one on a new date, then a count — cannot
+// attribute a sync to a tick: the loop reads the injected clock independently of
+// which tick it is handling, so an inverted date guard makes the same-date tick
+// sync and leaves a single count that looks identical to the correct result.
+// One tick per loop removes the ambiguity: there is nothing to misattribute.
+func runOneTick(t *testing.T, s *Scheduler, tick time.Time) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ticks := make(chan time.Time)
@@ -186,32 +169,53 @@ func TestRunTicksSyncsWhenTheDateChanges(t *testing.T) {
 		close(done)
 	}()
 
-	// A tick on the seeded date must not sync.
-	setNow(start)
-	ticks <- start
-	// A tick on a new date must sync.
-	next := start.Add(24 * time.Hour)
-	setNow(next)
-	ticks <- next
-
-	select {
-	case <-synced:
-	case <-time.After(2 * time.Second):
-		t.Fatal("RunTicks did not sync when a tick changed the date")
-	}
-	// The loop is a single goroutine reading the channel in order, so by the
-	// time the second tick's sync is observed the first tick has already been
-	// processed. A count of exactly one therefore proves the same-date tick did
-	// not sync either.
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("ticks produced %d syncs, want 1 (the same-date tick must not sync)", got)
-	}
-
-	// Closing the tick channel stops the loop too, not only cancellation.
+	ticks <- tick
 	close(ticks)
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("RunTicks did not return after its tick channel closed")
+	}
+}
+
+// A tick on the date the scheduler was seeded with must not sync. This is the
+// test that catches a date guard that syncs on the same date.
+func TestRunTicksDoesNotSyncOnTheSameDate(t *testing.T) {
+	start := time.Date(2026, 9, 27, 23, 59, 0, 0, time.UTC)
+	var calls int
+	now := start
+	s := New(func() time.Time { return now }, func(context.Context) error {
+		calls++
+		return nil
+	})
+
+	// The clock is at the seeded date when this tick is processed.
+	runOneTick(t, s, start)
+
+	if calls != 0 {
+		t.Fatalf("a tick on the seeded date synced %d times, want 0", calls)
+	}
+}
+
+// A tick on a new date must sync, and exactly once. This is the test that
+// catches a date guard that suppresses the refresh (or a RunTicks that never
+// reaches MaybeSync at all).
+func TestRunTicksSyncsWhenTheDateChanges(t *testing.T) {
+	start := time.Date(2026, 9, 27, 23, 59, 0, 0, time.UTC)
+	next := start.Add(24 * time.Hour)
+	var calls int
+	now := start
+	s := New(func() time.Time { return now }, func(context.Context) error {
+		calls++
+		return nil
+	})
+
+	// The loop reads the clock when it handles the tick, which is now the new
+	// date; the seed above fixed lastDate at start, so this is a date change.
+	now = next
+	runOneTick(t, s, next)
+
+	if calls != 1 {
+		t.Fatalf("a date-changing tick synced %d times, want 1", calls)
 	}
 }

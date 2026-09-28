@@ -433,7 +433,14 @@ func TestRevalidateSessionCancellationLeavesTheCredential(t *testing.T) {
 	out := make(chan SessionOutcome, 1)
 	go func() { out <- h.RevalidateSession(ctx) }()
 
-	<-entered
+	// Bounded: if the validation read is never reached (the context is not
+	// threaded) this fails crisply in two seconds instead of hanging the package
+	// until the test timeout.
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellation never reached the read")
+	}
 	cancel()
 
 	select {

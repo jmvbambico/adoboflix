@@ -273,8 +273,9 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 	// Validate before persisting or swapping: a wrong code must fail here, not
 	// on the user's first playback attempt. Whether the code is *kept* is a
 	// separate question — not "did the call succeed" but "did AdoboTV recognise
-	// the code". See playlistCodeProvenValid. The request's context bounds the
-	// upstream call, so a client that gives up cancels the validation with it.
+	// the code". See playlistCodeProvenValid. The request's context is passed
+	// through, so where the adapter can honour one (source.ContextChannelLister,
+	// as adobotv-http does) a client that gives up cancels the validation with it.
 	validationErr := validatePlaylistCode(c.Request.Context(), candidate)
 	if validationErr != nil && !playlistCodeProvenValid(validationErr) {
 		writeSourceError(c, validationErr, "")
