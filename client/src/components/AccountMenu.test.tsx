@@ -273,7 +273,7 @@ describe("AccountMenu", () => {
     await openMenu(queryClient);
 
     expect(screen.getByText("Playlist code connected")).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: /change playlist code/i })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: /change adobotv login/i })).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /disconnect/i })).toBeInTheDocument();
   });
 
@@ -499,7 +499,7 @@ describe("AccountMenu", () => {
     expect(screen.getByText(/pinned to a content source by its server configuration/i)).toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: /disconnect/i })).toBeInTheDocument();
     // Negative: the actions that would fail with 409 are disabled, not offered.
-    expect(screen.getByRole("menuitem", { name: /change playlist code/i })).toBeDisabled();
+    expect(screen.getByRole("menuitem", { name: /change adobotv login/i })).toBeDisabled();
     expect(screen.getByRole("menuitem", { name: /import local playlist/i })).toBeDisabled();
   });
 
@@ -593,7 +593,7 @@ describe("AccountMenu", () => {
     // Negative: the destructive request has not been made yet.
     expect(backend.calls.some((c) => c.method === "DELETE")).toBe(false);
     // Positive: the confirmation explains what disconnecting costs.
-    expect(screen.getByText(/type it in again in full/i)).toBeInTheDocument();
+    expect(screen.getByText(/sign in to adobotv again/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("menuitem", { name: /yes, disconnect/i }));
 
@@ -608,7 +608,7 @@ describe("AccountMenu", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: /cancel/i }));
 
     // Positive: the confirmation is gone (the Cancel button existed to click).
-    expect(screen.queryByText(/type it in again in full/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/sign in to adobotv again/i)).not.toBeInTheDocument();
     // Negative, made non-vacuous: let the deferred mutation run first, so a
     // Cancel that also fired clear.mutate() is caught.
     await settleMutations();

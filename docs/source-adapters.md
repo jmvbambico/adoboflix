@@ -69,6 +69,22 @@ and silently substituting the chooser would hide a broken deployment.
 The user supplies a **playlist code**. Nothing else. Everything downstream is
 derived from it.
 
+The code can arrive two ways, and both end in the same place — a stored code:
+
+- **Sign in with a username and password** (`POST /api/v1/source/login`). The
+  AdoboFlix server authenticates against AdoboTV's `POST /v1/auth/login`, reads
+  the account's `playlistCode` from the authenticated `GET /v1/profile`, and
+  stores that code. The user never sees or types a code; the password is used for
+  that single request and is never persisted. A login is therefore just a way to
+  *obtain* a code, and everything below still hangs off one.
+- **Enter a playlist code directly** (`POST /api/v1/source/playlist-code`), for a
+  user who has a code but no dashboard account.
+
+This is why the login path exists at all: a playlist code is the upstream
+credential, and the code the user typed was brute-forceable — a short random
+suffix against an endpoint with no rate limit. A username and password replaces
+it as the *entry* method while the code stays the *stored* credential.
+
 ```
 GET /v1/playlist/:code                       (JSON is the default format)
   -> GetUserByPlaylistCode
@@ -299,10 +315,10 @@ the check entirely.
 The two selectable paths can be chosen while the server runs, instead of editing
 `.env` and restarting:
 
-- **Login to AdoboTV** — enter a playlist code (`POST
-  /api/v1/source/playlist-code`). Entering a code **selects the `adobotv-http`
-  mode** whether the server is sourceless, already on `adobotv-http`, or on
-  `file`.
+- **Login to AdoboTV** — sign in with a username and password (`POST
+  /api/v1/source/login`), or enter a playlist code directly (`POST
+  /api/v1/source/playlist-code`). Either **selects the `adobotv-http` mode**
+  whether the server is sourceless, already on `adobotv-http`, or on `file`.
 - **Import Local Playlist** — upload a playlist (`POST
   /api/v1/source/playlist-file`). Importing **selects the `file` mode**.
 
@@ -310,9 +326,11 @@ Both are refused with `409 source_pinned_by_env` when `ADOBOFLIX_SOURCE` pins a
 different source: the override is the only way to a dev adapter, so the UI must
 not fight it.
 
-The playlist code arrives through the API while the server runs and is stored in
-a **local file the server owns** — never in the browser, and never upstream.
-`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply it.
+The credential arrives through the API while the server runs and is stored in a
+**local file the server owns** — never in the browser, and never upstream.
+`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` is not the only way to supply it. In both
+paths the playlist code is the only value that persists; a password entered at
+login is used for that one request and never stored.
 
 ### Precedence — the file wins
 
@@ -347,6 +365,7 @@ GET    /api/v1/source/status
                     "active", "configured", "needs_playlist_code" } ] }
        # never the code, and the account facts when the adapter can supply them
 
+POST   /api/v1/source/login            {"username": "...", "password": "..."}
 POST   /api/v1/source/playlist-code    {"code": "..."}
 DELETE /api/v1/source/playlist-code
 POST   /api/v1/source/playlist-file    <the playlist content: JSON or M3U>
@@ -378,6 +397,65 @@ The client already branches on those; no parallel vocabulary is introduced.
 environment fallback, or the unconfigured state). Clearing nothing is not an
 error. The chosen mode is left alone — the user still wants the login path,
 they have simply removed its credential.
+
+### Logging in with a username and password
+
+`POST /api/v1/source/login` takes `{"username": "...", "password": "..."}` and
+does the following, entirely server-side:
+
+```
+POST {ADOBOFLIX_ADOBOTV_BASE_URL}/v1/auth/login   {"username","password","recaptchaToken":""}
+  -> {"data":{"access_token": "..."}}
+GET  {ADOBOFLIX_ADOBOTV_BASE_URL}/v1/profile      Authorization: Bearer <access_token>
+  -> {"data":{"playlistCode": "..."}}
+  -> store playlistCode, validate it, swap the source   (exactly as a typed code)
+```
+
+The browser never calls AdoboTV. AdoboFlix's whole posture is that credentials
+live server-side, and a direct browser call would also drag in CORS. The JWT the
+login returns is used **once**, immediately, to read the profile and is then
+discarded; the playlist code is what persists, so keeping an expiring second
+credential would add a lifecycle to manage for no gain.
+
+The playlist code read from the profile is handed to the *same* code path a
+typed-in code takes: it is validated against AdoboTV and only persisted if it
+proves valid, the mode is remembered, and the live source is swapped. Every
+downstream concern — the weekly re-check, the daily sync, the gate
+classification, the device-pending handling — is unchanged, because it still
+operates on a playlist code.
+
+**The password.** It is more sensitive than the playlist code: it is reusable and
+probably shared with other services. It exists for the duration of one request.
+It is placed in the login request body to AdoboTV and nowhere else — never
+persisted, never logged, never placed in a response body or an error, and dropped
+the moment the call returns. The adapter's login errors carry only a redacted URL,
+a status, or one of its own sentinels; the upstream message is deliberately not
+echoed. Only the playlist code persists.
+
+**The failure vocabulary** — the same stable codes the rest of the API uses:
+
+| Outcome | Status | Code | Persisted? |
+|---|---|---|---|
+| login accepted, profile carries a code | `200` | — | the code, then validated and swapped |
+| a code that proves valid but is gated (`device_pending`, `subscription_inactive`, …) | e.g. `403` | that gate's code | the code — nothing to retype |
+| bad username or bad password | `401` | `invalid_credentials` | nothing |
+| AdoboTV demands a reCAPTCHA token | `403` | `captcha_required` | nothing |
+| login accepted, profile carries **no** code | `502` | `account_without_playlist_code` | nothing |
+| transport failure / non-2xx | `502` | `upstream_error` | nothing |
+
+`invalid_credentials` deliberately does **not** say whether the username or the
+password was wrong. AdoboTV returns one `401` for both to prevent enumeration,
+and AdoboFlix preserves that — the code and message are identical either way, so
+the endpoint cannot be used to probe which usernames exist.
+
+`captcha_required` is distinct from `invalid_credentials` on purpose. When
+AdoboTV has `RecaptchaSecret` configured, its login returns `403 "reCAPTCHA token
+is required"`; AdoboFlix cannot mint that token server-side. Reporting it as a
+credential failure would tell a user with a correct password that it was wrong
+and send them to change it. The message instead names the captcha and points at
+the code-entry path. (The `adobotv-client`'s site key falls back to Google's
+public *test* key, so this upstream configuration is fragile; AdoboFlix only
+reports it accurately, it does not try to solve it.)
 
 ### Importing a playlist file
 
@@ -555,6 +633,19 @@ user's own credential, is not a write to AdoboTV. No adapter gained a write
 method: the code is supplied to `source.Open` through an additive
 `source.Config.PlaylistCode` field and the adapter is reopened, exactly as it is
 at startup.
+
+The password at login is stricter still, because it is reusable and probably
+shared with other services: it is never *persisted* at all. It lives for one
+request, is placed only in the login request body to AdoboTV, and is never
+logged, never stored, and never placed in a response body or an error. The code
+read from the authenticated profile is the only value that persists — so the
+login path adds no second stored credential.
+
+Authenticating is not an upstream write in the First Law's sense.
+`POST /v1/auth/login` is authentication; where AdoboTV updates `users.last_login`,
+it does so server-side as its own job — the same category as the device rows it
+writes while serving a playlist. It is not content mutation, and it grants
+AdoboFlix no write method.
 
 ## Verifying the HTTP adapter locally
 

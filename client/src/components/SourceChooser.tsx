@@ -77,7 +77,7 @@ export default function SourceChooser({ status, onLogin, onImport }: SourceChoos
             const Icon = login ? KeyRound : FileUp;
             const label = login ? "Login to AdoboTV" : "Import Local Playlist";
             const description = login
-              ? "Enter your AdoboTV playlist code and stream the library your subscription entitles you to."
+              ? "Sign in with your AdoboTV username and password to stream the library your subscription entitles you to."
               : "Pick a playlist file on this device — JSON, M3U or M3U8 — and play it with no account.";
             return (
               <button

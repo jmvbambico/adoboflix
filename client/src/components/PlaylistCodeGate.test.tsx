@@ -31,10 +31,13 @@ interface Backend {
   active: boolean;
   // The reply POST /source/playlist-code gives.
   post: { status: number; body: { error?: string; code?: string } };
+  // The reply POST /source/login gives.
+  login: { status: number; body: { error?: string; code?: string } };
 }
 
 const STATUS_URL = "/api/v1/source/status";
 const CODE_URL = "/api/v1/source/playlist-code";
+const LOGIN_URL = "/api/v1/source/login";
 
 // The codes the server keeps the submitted code for, mirroring
 // playlistCodeProvenValid. The mock persists on these (and on any 2xx) so a
@@ -56,6 +59,7 @@ function installBackend(init: Partial<Backend> = {}) {
     configured: false,
     active: true,
     post: { status: 200, body: {} },
+    login: { status: 200, body: {} },
     ...init,
   };
   const calls: FetchCall[] = [];
@@ -99,19 +103,28 @@ function installBackend(init: Partial<Backend> = {}) {
       calls.push({ url, method, body });
 
       if (url.endsWith(STATUS_URL)) return makeResponse(200, statusBody());
-      if (url.endsWith(CODE_URL)) {
-        if (method === "POST") {
-          const { status, body: reply } = backend.post;
-          const code = reply.code;
-          if (status < 300 || (code !== undefined && (SAVED_CODES as readonly string[]).includes(code))) {
-            backend.configured = true;
-          }
-          return makeResponse(status, reply);
+      // Both connect endpoints share one reply shape and one "was it kept"
+      // rule, so a login that proves the code valid persists it exactly as a
+      // typed code does.
+      const connect =
+        method === "POST" && url.endsWith(CODE_URL)
+          ? backend.post
+          : method === "POST" && url.endsWith(LOGIN_URL)
+            ? backend.login
+            : null;
+      if (connect) {
+        const code = connect.body.code;
+        if (
+          connect.status < 300 ||
+          (code !== undefined && (SAVED_CODES as readonly string[]).includes(code))
+        ) {
+          backend.configured = true;
         }
-        if (method === "DELETE") {
-          backend.configured = false;
-          return makeResponse(200, statusBody());
-        }
+        return makeResponse(connect.status, connect.body);
+      }
+      if (url.endsWith(CODE_URL) && method === "DELETE") {
+        backend.configured = false;
+        return makeResponse(200, statusBody());
       }
       throw new Error(`unexpected fetch: ${method} ${url}`);
     }),
@@ -143,20 +156,42 @@ function renderGate(errors?: unknown[]) {
 }
 
 const SECRET = "SUPER-SECRET-PLAYLIST-CODE";
+const PASSWORD = "SUPER-SECRET-PASSWORD";
+const USERNAME = "alice";
+
+// The code form is the secondary path now, so a test that exercises it first
+// switches off the default username/password form.
+async function openCodeForm() {
+  fireEvent.click(await screen.findByRole("button", { name: /only have a playlist code/i }));
+}
 
 async function submitCode(code: string) {
+  await openCodeForm();
   const input = await screen.findByLabelText("Playlist code");
   fireEvent.change(input, { target: { value: code } });
-  fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+  fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+}
+
+// The default path: username and password.
+async function submitCredentials(username: string, password: string) {
+  const user = await screen.findByLabelText("AdoboTV username");
+  fireEvent.change(user, { target: { value: username } });
+  fireEvent.change(screen.getByLabelText("AdoboTV password"), { target: { value: password } });
+  fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
 }
 
 describe("PlaylistCodeGate — entry", () => {
-  it("shows the entry form when the status says a code is needed", async () => {
+  it("shows the login form when the status says a credential is needed", async () => {
     installBackend({ configured: false });
     renderGate();
 
-    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+    expect(await screen.findByLabelText("AdoboTV username")).toBeInTheDocument();
+    expect(screen.getByLabelText("AdoboTV password")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /connect/i })).toBeInTheDocument();
+    // The playlist code is still reachable, as the secondary path.
+    expect(
+      screen.getByRole("button", { name: /only have a playlist code/i }),
+    ).toBeInTheDocument();
   });
 
   // The connected happy path is silent. The gate no longer renders a
@@ -177,7 +212,8 @@ describe("PlaylistCodeGate — entry", () => {
     );
 
     expect(container.firstChild).toBeNull();
-    // Negative: neither the credential field nor a duplicate clear action.
+    // Negative: neither credential field nor a duplicate clear action.
+    expect(screen.queryByLabelText("AdoboTV username")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /clear playlist code/i })).not.toBeInTheDocument();
   });
@@ -193,11 +229,11 @@ describe("PlaylistCodeGate — entry", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("still opens the entry form for a required error when no code is configured", async () => {
+  it("still opens the login form for a required error when no code is configured", async () => {
     installBackend({ configured: false });
     renderGate([new ApiError("needs a code", 403, "playlist_code_required")]);
 
-    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+    expect(await screen.findByLabelText("AdoboTV username")).toBeInTheDocument();
   });
 
   it("defers to server truth: a configured status renders nothing even for a required error", async () => {
@@ -206,7 +242,7 @@ describe("PlaylistCodeGate — entry", () => {
 
     // The required error momentarily shows the form until the status resolves;
     // once it says configured, server truth wins and the gate goes quiet.
-    await waitFor(() => expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByLabelText("AdoboTV username")).not.toBeInTheDocument());
     expect(container.firstChild).toBeNull();
   });
 });
@@ -227,17 +263,24 @@ describe("PlaylistCodeGate — first-run chooser", () => {
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
   });
 
-  it("opens the code form from Login to AdoboTV, with a way back to the chooser", async () => {
+  it("opens the login form from Login to AdoboTV, with the code as a secondary path and a way back", async () => {
     installBackend({ active: false, needs: false });
     renderGate();
 
     fireEvent.click(await screen.findByRole("button", { name: /login to adobotv/i }));
+    // Default: username and password.
+    expect(screen.getByLabelText("AdoboTV username")).toBeInTheDocument();
+    expect(screen.getByLabelText("AdoboTV password")).toBeInTheDocument();
+
+    // The playlist code is reachable behind the secondary toggle.
+    fireEvent.click(screen.getByRole("button", { name: /only have a playlist code/i }));
     expect(screen.getByLabelText("Playlist code")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /back/i }));
     expect(
       await screen.findByRole("heading", { name: /choose how to connect/i }),
     ).toBeInTheDocument();
+    expect(screen.queryByLabelText("AdoboTV username")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Playlist code")).not.toBeInTheDocument();
   });
 
@@ -252,13 +295,13 @@ describe("PlaylistCodeGate — first-run chooser", () => {
   });
 
   // Paired with the chooser case above: once a source is active the chooser is
-  // gone. The code form's presence is the positive guarantee that the status
+  // gone. The login form's presence is the positive guarantee that the status
   // resolved and the active source is really being measured.
   it("renders no chooser once a source is active", async () => {
     installBackend({ active: true, needs: true, configured: false });
     renderGate();
 
-    expect(await screen.findByLabelText("Playlist code")).toBeInTheDocument();
+    expect(await screen.findByLabelText("AdoboTV username")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: /choose how to connect/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /login to adobotv/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /import local playlist/i })).not.toBeInTheDocument();
@@ -319,6 +362,7 @@ describe("PlaylistCodeGate — submission", () => {
     });
     const { container } = renderGate();
 
+    await openCodeForm();
     const input = await screen.findByLabelText("Playlist code");
     fireEvent.change(input, { target: { value: SECRET } });
     // Positive: the value is held by the masked field before submission.
@@ -521,3 +565,87 @@ describe("PlaylistCodeGate — success", () => {
 // Disconnect, with its own confirmation. That path — including the DELETE — is
 // covered in AccountMenu.test.tsx; the gate deliberately renders no clear
 // control to duplicate it.
+
+describe("PlaylistCodeGate — login by username and password", () => {
+  it("posts the credentials to the login endpoint and clears the gate on success", async () => {
+    const backend = installBackend();
+    renderGate();
+
+    await submitCredentials(USERNAME, PASSWORD);
+
+    await waitFor(() => expect(backend.calls.some((c) => c.method === "POST")).toBe(true));
+    const post = backend.calls.find((c) => c.method === "POST");
+    expect(post?.url.endsWith(LOGIN_URL)).toBe(true);
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({ username: USERNAME, password: PASSWORD });
+    // The gate goes quiet once the server has stored the code.
+    await waitFor(() => expect(screen.queryByLabelText("AdoboTV username")).not.toBeInTheDocument());
+  });
+
+  it("clears the password from the DOM after submitting and never renders it", async () => {
+    const backend = installBackend({
+      login: {
+        status: 401,
+        body: { error: "AdoboTV rejected the username or password", code: "invalid_credentials" },
+      },
+    });
+    const { container } = renderGate();
+
+    const password = await screen.findByLabelText("AdoboTV password");
+    fireEvent.change(screen.getByLabelText("AdoboTV username"), { target: { value: USERNAME } });
+    fireEvent.change(password, { target: { value: PASSWORD } });
+    // Positive: the masked field holds the password before submission.
+    expect(password).toHaveValue(PASSWORD);
+
+    fireEvent.click(screen.getByRole("button", { name: /connect/i }));
+    await screen.findByText("AdoboTV did not accept those credentials");
+
+    // The POST really carried the password, so the absence below is not vacuous.
+    const post = backend.calls.find((c) => c.method === "POST");
+    expect(post?.body).toContain(PASSWORD);
+    // Negative: after submission the password appears nowhere in the output, and
+    // the masked field is emptied.
+    expect(container.innerHTML).not.toContain(PASSWORD);
+    expect(screen.getByLabelText("AdoboTV password")).toHaveValue("");
+  });
+
+  it("shows the captcha copy distinctly, never as a rejected password", async () => {
+    installBackend({ login: { status: 403, body: { error: "recaptcha", code: "captcha_required" } } });
+    renderGate();
+
+    await submitCredentials(USERNAME, PASSWORD);
+
+    expect(
+      await screen.findByRole("heading", { name: "AdoboTV requires a captcha to log in" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/not been rejected/i)).toBeInTheDocument();
+    // Negative: it is not the credential-refusal wording.
+    expect(screen.queryByText("AdoboTV did not accept those credentials")).not.toBeInTheDocument();
+    // And the form stays so the user can switch to the code path.
+    expect(screen.getByLabelText("AdoboTV username")).toBeInTheDocument();
+  });
+
+  it("treats a saved-but-gated login as saved, exactly like a typed code", async () => {
+    installBackend({ login: { status: 403, body: { error: "device pending", code: "device_pending" } } });
+    const { container } = renderGate();
+
+    await submitCredentials(USERNAME, PASSWORD);
+
+    expect(await screen.findByRole("heading", { name: /playlist code saved/i })).toBeInTheDocument();
+    expect(screen.getByText(/once the AdoboTV operator approves this device/i)).toBeInTheDocument();
+    expect(container.innerHTML).not.toContain(PASSWORD);
+  });
+
+  it("shows the account-without-a-code copy for that failure", async () => {
+    installBackend({
+      login: { status: 502, body: { error: "no code", code: "account_without_playlist_code" } },
+    });
+    renderGate();
+
+    await submitCredentials(USERNAME, PASSWORD);
+
+    expect(
+      await screen.findByRole("heading", { name: "This AdoboTV account has no playlist code" }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("AdoboTV username")).toBeInTheDocument();
+  });
+});

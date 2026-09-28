@@ -241,6 +241,11 @@ func main() {
 		// /api/v1 — see "Stream URL exposure" in docs/source-adapters.md before
 		// exposing this server beyond loopback.
 		api.GET("/source/status", sourceHandler.GetStatus)
+		// The credential-entry path: authenticate a username/password against
+		// AdoboTV, read the account's playlist code from the authenticated
+		// profile, and store it. The password is used for this one request and
+		// never persisted, logged, or echoed (see SourceHandler.Login).
+		api.POST("/source/login", sourceHandler.Login)
 		api.POST("/source/playlist-code", sourceHandler.SetPlaylistCode)
 		api.DELETE("/source/playlist-code", sourceHandler.DeletePlaylistCode)
 		api.POST("/source/playlist-file", sourceHandler.SetPlaylistFile)

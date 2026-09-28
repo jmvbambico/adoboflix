@@ -10,19 +10,27 @@ import { savedReassurance, usePlaylistCodeController } from "./playlistCode";
 
 interface PlaylistCodeModalProps {
   // Whether a code is already connected. Changes the title and the submit
-  // label so "change" does not read like a first connect.
+  // label so "reconnect" does not read like a first connect.
   configured: boolean;
   onClose: () => void;
 }
 
-// PlaylistCodeModal is the account menu's entry point for a playlist code. It
-// is mounted only while open, so each open starts from a clean input. It never
-// renders the code back and clears it the moment it is submitted, exactly as
-// the inline gate does; both share usePlaylistCodeController for the submit and
-// gate-code handling.
+type ConnectMode = "credentials" | "code";
+
+// PlaylistCodeModal is the account menu's entry point for connecting an AdoboTV
+// account. Username and password are the entry method; the playlist code stays
+// reachable as a secondary option for a user who only has a code. It is mounted
+// only while open, so each open starts from a clean input.
+//
+// Like the inline gate it never renders a credential back, and it clears the
+// password (and the code) the moment the form is submitted; both share
+// usePlaylistCodeController for the submit and gate-code handling.
 export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeModalProps) {
+  const [mode, setMode] = useState<ConnectMode>("credentials");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
-  const { submit, submitCode, outcome } = usePlaylistCodeController();
+  const { submit, login, submitCode, submitLogin, outcome } = usePlaylistCodeController();
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,15 +65,24 @@ export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeM
   const saved = outcome?.kind === "saved";
   const failed = outcome?.kind === "failed" ? outcome.copy : null;
 
-  const handleSubmit = (event: FormEvent) => {
+  const handleCredentialSubmit = (event: FormEvent) => {
+    event.preventDefault();
+    const user = username.trim();
+    if (!user || !password) return;
+    const secret = password;
+    // Clear the password before the request settles: it must not stay in the
+    // mounted DOM.
+    setPassword("");
+    // onConnected fires only on a full connect; a saved-but-gated outcome
+    // reports itself below instead of closing.
+    submitLogin(user, secret, onClose);
+  };
+
+  const handleCodeSubmit = (event: FormEvent) => {
     event.preventDefault();
     const value = code.trim();
     if (!value) return;
-    // Clear before the request settles: the entered value must not stay in the
-    // mounted DOM.
     setCode("");
-    // onConnected fires only on a full connect; a saved-but-gated outcome
-    // reports itself below instead of closing.
     submitCode(value, onClose);
   };
 
@@ -90,11 +107,12 @@ export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeM
               id="playlist-code-modal-title"
               className="font-display font-bold text-base text-slate-100 tracking-wide"
             >
-              {configured ? "Change playlist code" : "Connect AdoboTV"}
+              {configured ? "Reconnect AdoboTV" : "Login to AdoboTV"}
             </h4>
             <p className="text-xs text-slate-400 leading-relaxed">
-              Your AdoboTV playlist code is the only credential AdoboFlix needs. It is stored on this
-              server and never shown back.
+              {mode === "credentials"
+                ? "Sign in with your AdoboTV username and password. AdoboFlix stores only the playlist code it reads from your account — never your password."
+                : "Your AdoboTV playlist code is the only credential AdoboFlix needs. It is stored on this server and never shown back."}
             </p>
           </div>
           <button
@@ -138,40 +156,102 @@ export default function PlaylistCodeModal({ configured, onClose }: PlaylistCodeM
               </p>
             )}
 
-            <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-              <div className="flex flex-col gap-1.5">
-                <label
-                  htmlFor="account-playlist-code"
-                  className="text-[11px] font-semibold text-slate-300"
+            {mode === "credentials" ? (
+              <form onSubmit={handleCredentialSubmit} className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="account-adobotv-username" className="text-[11px] font-semibold text-slate-300">
+                    AdoboTV username
+                  </label>
+                  <input
+                    id="account-adobotv-username"
+                    name="username"
+                    type="text"
+                    value={username}
+                    onChange={(event) => setUsername(event.target.value)}
+                    placeholder="Your AdoboTV username"
+                    autoComplete="off"
+                    autoFocus
+                    disabled={login.isPending}
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950/50 border border-white/10 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-orange-500/40 focus:ring-1 focus:ring-orange-500/20 disabled:opacity-60"
+                  />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label htmlFor="account-adobotv-password" className="text-[11px] font-semibold text-slate-300">
+                    AdoboTV password
+                  </label>
+                  <input
+                    id="account-adobotv-password"
+                    name="password"
+                    type="password"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="Your AdoboTV password"
+                    autoComplete="off"
+                    disabled={login.isPending}
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950/50 border border-white/10 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-orange-500/40 focus:ring-1 focus:ring-orange-500/20 disabled:opacity-60"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={login.isPending || username.trim() === "" || password === ""}
+                  className="w-fit px-5 py-2.5 bg-gradient-to-tr from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 rounded-xl text-xs font-bold tracking-wider text-white shadow-lg shadow-orange-600/20 flex items-center gap-2 transition-all active:scale-98 cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Playlist code
-                </label>
-                <input
-                  id="account-playlist-code"
-                  name="playlist-code"
-                  type="password"
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  placeholder="Enter your AdoboTV playlist code"
-                  autoComplete="off"
-                  autoFocus
-                  disabled={submit.isPending}
-                  className="w-full px-3 py-2.5 rounded-xl bg-slate-950/50 border border-white/10 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-orange-500/40 focus:ring-1 focus:ring-orange-500/20 disabled:opacity-60"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={submit.isPending || code.trim() === ""}
-                className="w-fit px-5 py-2.5 bg-gradient-to-tr from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 rounded-xl text-xs font-bold tracking-wider text-white shadow-lg shadow-orange-600/20 flex items-center gap-2 transition-all active:scale-98 cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {submit.isPending ? (
-                  <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <KeyRound className="w-3.5 h-3.5" />
-                )}
-                {submit.isPending ? "Connecting…" : configured ? "Change code" : "Connect"}
-              </button>
-            </form>
+                  {login.isPending ? (
+                    <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <KeyRound className="w-3.5 h-3.5" />
+                  )}
+                  {login.isPending ? "Connecting…" : configured ? "Reconnect" : "Connect"}
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleCodeSubmit} className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label
+                    htmlFor="account-playlist-code"
+                    className="text-[11px] font-semibold text-slate-300"
+                  >
+                    Playlist code
+                  </label>
+                  <input
+                    id="account-playlist-code"
+                    name="playlist-code"
+                    type="password"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    placeholder="Enter your AdoboTV playlist code"
+                    autoComplete="off"
+                    autoFocus
+                    disabled={submit.isPending}
+                    className="w-full px-3 py-2.5 rounded-xl bg-slate-950/50 border border-white/10 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:border-orange-500/40 focus:ring-1 focus:ring-orange-500/20 disabled:opacity-60"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={submit.isPending || code.trim() === ""}
+                  className="w-fit px-5 py-2.5 bg-gradient-to-tr from-orange-600 to-amber-500 hover:from-orange-700 hover:to-amber-600 rounded-xl text-xs font-bold tracking-wider text-white shadow-lg shadow-orange-600/20 flex items-center gap-2 transition-all active:scale-98 cursor-pointer focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {submit.isPending ? (
+                    <LoaderCircle className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <KeyRound className="w-3.5 h-3.5" />
+                  )}
+                  {submit.isPending ? "Connecting…" : configured ? "Change code" : "Connect"}
+                </button>
+              </form>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                setMode((prev) => (prev === "credentials" ? "code" : "credentials"));
+              }}
+              className="w-fit text-xs font-semibold text-orange-300/90 hover:text-orange-200 underline underline-offset-4 cursor-pointer focus:outline-none"
+            >
+              {mode === "credentials"
+                ? "Only have a playlist code? Use it instead"
+                : "Use your AdoboTV username and password instead"}
+            </button>
           </>
         )}
       </div>

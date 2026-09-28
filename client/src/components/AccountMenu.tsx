@@ -85,7 +85,7 @@ export default function AccountMenu() {
   const offers = selectableModes(status);
   const hasCodeOffer = offers.some((mode) => mode.needs_playlist_code);
   const hasFileOffer = offers.some((mode) => !mode.needs_playlist_code);
-  const codeOffered = needsCode && configured ? "Change playlist code" : "Login to AdoboTV";
+  const codeOffered = needsCode && configured ? "Change AdoboTV login" : "Login to AdoboTV";
 
   const disconnectError = clear.isError ? describeSourceError(clear.error) : null;
 
@@ -419,7 +419,7 @@ export default function AccountMenu() {
                     <div className="flex flex-col gap-2" role="none">
                       <p className="text-[11px] leading-relaxed text-slate-300">
                         Disconnecting removes the saved playlist code from this server. You will need
-                        to type it in again in full.
+                        to sign in to AdoboTV again.
                       </p>
                       <button
                         ref={confirmYesRef}
