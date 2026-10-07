@@ -478,3 +478,106 @@ export async function fetchChannelEPG(channelId: string): Promise<ChannelEPG | n
     return null;
   }
 }
+
+// ── Stream health scan API ────────────────────────────────────────────────────
+//
+// Health scanning REPORTS what is dead; it never repairs, rebuilds or prunes
+// anything upstream. These endpoints only start a probe run, read its aggregate
+// progress, and download the report file the user forwards to the operator out
+// of band.
+
+export type ScanState = "idle" | "running" | "done" | "error" | "cancelled";
+
+// Status is aggregate counters only — never per-channel rows (see
+// internal/scanner.Status). Per-channel results live in ScanReport.streams and
+// are fetched once, after the scan is terminal, so a poll while running stays
+// small.
+export interface ScanStatus {
+  state: ScanState;
+  started_at?: string;
+  finished_at?: string;
+  total: number;
+  probed: number;
+  alive: number;
+  dead: number;
+  error?: string;
+  has_report: boolean;
+}
+
+// One probe row, mirroring internal/scanner.ProbeResult. It carries the
+// redacted host and manifest — never a resolvable stream URL.
+export interface ScanStream {
+  channel_id: string;
+  channel_name: string;
+  category: string;
+  stream_id: string;
+  label: string;
+  host: string;
+  manifest: string;
+  alive: boolean;
+  http_status?: number;
+  reason?: string;
+  probed_at: string;
+}
+
+// The completed report, mirroring internal/scanner.Report.
+export interface ScanReport {
+  started_at: string;
+  finished_at: string;
+  total_channels: number;
+  alive_channels: number;
+  dead_channels: number;
+  total_streams: number;
+  alive_streams: number;
+  dead_streams: number;
+  streams: ScanStream[];
+}
+
+// Both 202 (a scan started) and 409 (one was already running) answer with the
+// same envelope: the scan's current status.
+interface ScanStartReply {
+  status: ScanStatus;
+  message: string;
+}
+
+const SCAN_URL = `${API_BASE}/channels/scan`;
+
+// startScan asks the server to begin a scan and resolves with the scan's status.
+// A 409 is NOT a failure: the server refused to start a SECOND scan because one
+// is already running and returns that scan's status in the same envelope as a
+// 202, so the caller adopts it rather than surfacing an error the user cannot
+// act on.
+export async function startScan(): Promise<ScanStatus> {
+  const res = await fetch(SCAN_URL, { method: "POST" });
+  if (res.ok || res.status === 409) {
+    const body = (await res.json()) as ScanStartReply;
+    return body.status;
+  }
+  const text = await res.text().catch(() => "");
+  throw apiErrorFromResponse(res.status, SCAN_URL, text);
+}
+
+export function fetchScanStatus(): Promise<ScanStatus> {
+  return getJSON<{ status: ScanStatus }>(`${SCAN_URL}/status`).then((res) => res.status);
+}
+
+export function fetchScanReport(): Promise<ScanReport> {
+  return getJSON<ScanReport>(`${SCAN_URL}/report`);
+}
+
+// fetchScanReportBlob downloads the report file as a blob (JSON by default, CSV
+// with ?format=csv). It is separate from the JSON reads because the report is a
+// downloadable FILE — the server sets Content-Disposition — rather than an app
+// envelope. A non-OK reply maps through the same ApiError path, so a 404/409/501
+// reaches the caller as copy the UI can render instead of raw JSON in a tab.
+export async function fetchScanReportBlob(
+  format: "json" | "csv",
+): Promise<{ blob: Blob; contentDisposition: string | null }> {
+  const url = format === "csv" ? `${SCAN_URL}/report?format=csv` : `${SCAN_URL}/report`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw apiErrorFromResponse(res.status, url, text);
+  }
+  return { blob: await res.blob(), contentDisposition: res.headers.get("Content-Disposition") };
+}
