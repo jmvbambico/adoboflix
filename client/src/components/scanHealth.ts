@@ -211,14 +211,35 @@ export function sortScanStreams(streams: ScanStream[]): ScanStream[] {
 
 // ── Downloads ─────────────────────────────────────────────────────────────
 
+// safeReportBasename reduces a header-supplied name to the only part that can
+// name a file. The header is written by our own Go handler, but it is still a
+// trust boundary: a malformed or crafted value must not be able to point the
+// download outside the browser's download directory. Strip every directory
+// component (so "../../etc/passwd" becomes "passwd" and "C:\\evil\\x.csv"
+// becomes "x.csv"), reject control characters, and return null when nothing
+// plausible is left so the caller can fall back. A legitimate server filename
+// passes through byte-for-byte.
+function safeReportBasename(raw: string): string | null {
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return null;
+  const segments = raw.split(/[\\/]/);
+  const name = segments[segments.length - 1].trim();
+  // Empty, or a pure dot-name ("." / "..") that names a directory rather than a
+  // file, is not a usable filename.
+  if (name === "" || /^\.+$/.test(name)) return null;
+  return name;
+}
+
 // parseReportFilename reads the server's Content-Disposition attachment
-// filename, falling back to a sane default when the header is absent or
-// malformed. Handles both the quoted form the Go handler writes
-// (filename="...") and an unquoted token.
+// filename, falling back to a sane default when the header is absent,
+// malformed, or names nothing safe. Handles both the quoted form the Go handler
+// writes (filename="...") and an unquoted token.
 export function parseReportFilename(disposition: string | null, fallback: string): string {
   if (disposition) {
     const match = /filename="?([^";]+)"?/i.exec(disposition);
-    if (match && match[1]) return match[1];
+    if (match && match[1]) {
+      const safe = safeReportBasename(match[1]);
+      if (safe) return safe;
+    }
   }
   return fallback;
 }
@@ -233,10 +254,17 @@ export function saveBlob(blob: Blob, filename: string): void {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  // Revoke on every path: if the append or the click throws, the object URL
+  // must still be released or it leaks for the life of the document. anchor.remove()
+  // is a no-op when the append never happened, so this is safe either way, and
+  // on the success path it is the same DOM cleanup as before.
+  try {
+    document.body.appendChild(anchor);
+    anchor.click();
+  } finally {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }
 }
 
 // downloadScanReport fetches the report as a blob and saves it under the

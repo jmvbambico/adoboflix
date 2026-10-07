@@ -100,6 +100,14 @@ export default function Dashboard() {
   const healthScanAvailable = healthScanTabAvailable(sourceStatus);
   const activeTabView = resolveDashboardTab(activeTab, healthScanAvailable);
 
+  // The health panel's own preconditions are an active source that reports
+  // health_scan_supported — both already folded into activeTabView by
+  // resolveDashboardTab. It deliberately does NOT depend on the VOD library
+  // read: a user whose /entries call is failing is exactly the user who needs
+  // the scanner, so the panel stays reachable while the other tabs show the
+  // source-error state.
+  const healthTabActive = activeTabView === "health";
+
   // Selected Movie for active cinematic playback details
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
 
@@ -1431,12 +1439,12 @@ export default function Dashboard() {
 
           {/* DYNAMIC LIST FEED BY SELECTED TABS */}
           <div className="w-full">
-            {isLoading ? (
+            {isLoading && !healthTabActive ? (
               <div className="flex flex-col gap-4 py-20 justify-center items-center w-full">
                 <SpinnerOverlay />
                 <span className="text-xs font-mono text-violet-400 animate-pulse uppercase tracking-widest">Constructing glass lattice pipelines...</span>
               </div>
-            ) : libraryUnavailable ? (
+            ) : libraryUnavailable && !healthTabActive ? (
               <SourceStatusPanel error={videosError} onRetry={() => { void refetchVideos(); }} />
             ) : (
               <AnimatePresence mode="popLayout">
@@ -1788,6 +1796,19 @@ export default function Dashboard() {
                     exit={{ opacity: 0, y: 10 }}
                     transition={{ duration: 0.3 }}
                   >
+                    {/* The health scanner talks only to /channels/scan*, so a
+                        failed VOD library read does not stop it. Say so in one
+                        line rather than reproducing the big source-error panel
+                        here. */}
+                    {libraryUnavailable && (
+                      <p
+                        role="status"
+                        className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs text-amber-200/90"
+                      >
+                        The video library could not be read, so the catalogue tabs are unavailable.
+                        The health scanner uses only the scan endpoints, so it still works.
+                      </p>
+                    )}
                     <StreamHealthPanel />
                   </motion.div>
                 )}

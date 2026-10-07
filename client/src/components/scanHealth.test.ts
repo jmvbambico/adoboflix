@@ -149,6 +149,32 @@ describe("parseReportFilename", () => {
     expect(parseReportFilename(null, "adoboflix-scan-report.json")).toBe("adoboflix-scan-report.json");
     expect(parseReportFilename("attachment", "adoboflix-scan-report.csv")).toBe("adoboflix-scan-report.csv");
   });
+
+  it("reduces path-like and traversal filenames to a safe basename", () => {
+    // Directory components are dropped; only the leaf names the file.
+    expect(parseReportFilename('attachment; filename="../../../../etc/passwd"', "fallback.json")).toBe(
+      "passwd",
+    );
+    // Windows drive and backslash separators are stripped the same way.
+    expect(parseReportFilename('attachment; filename="C:\\Users\\evil\\report.csv"', "fallback.csv")).toBe(
+      "report.csv",
+    );
+    // A name that is only traversal names nothing writable — fall back.
+    expect(parseReportFilename('attachment; filename="../../.."', "fallback.json")).toBe("fallback.json");
+    // A control character in the name is rejected outright.
+    expect(parseReportFilename('attachment; filename="bad\u0000name.json"', "fallback.json")).toBe(
+      "fallback.json",
+    );
+  });
+
+  it("passes the legitimate server filename through unchanged", () => {
+    // The regression guard: the sanitiser must not be over-eager. The server's
+    // own name must survive byte-for-byte, quoted or unquoted.
+    const csv = "adoboflix-scan-report-20260101-120000.csv";
+    const json = "adoboflix-scan-report-20260101-120000.json";
+    expect(parseReportFilename(`attachment; filename="${csv}"`, "fallback.csv")).toBe(csv);
+    expect(parseReportFilename(`attachment; filename=${json}`, "fallback.json")).toBe(json);
+  });
 });
 
 describe("describeScanStatus", () => {
@@ -239,5 +265,25 @@ describe("downloadScanReport", () => {
     stubObjectUrls();
 
     await expect(downloadScanReport("json")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("revokes the object URL even when the click throws", async () => {
+    const body = '{"streams":[]}';
+    vi.stubGlobal("fetch", vi.fn(async () => fileResponse(200, body)));
+    const { createObjectURL, revokeObjectURL } = stubObjectUrls();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {
+      throw new Error("click blocked by the browser");
+    });
+
+    try {
+      // Positive: the click really threw and the failure propagated, so the
+      // revoke assertion below is measured on a genuinely failed save and not a
+      // success path that trivially revokes.
+      await expect(downloadScanReport("json")).rejects.toThrow("click blocked by the browser");
+      expect(createObjectURL).toHaveBeenCalled();
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+    } finally {
+      clickSpy.mockRestore();
+    }
   });
 });

@@ -36,15 +36,19 @@ function makeStatus(overrides: Partial<SourceStatus> = {}): SourceStatus {
 // status the health panel asks for once its tab is opened. It records every call
 // and returns the mutable status object it serialized, so a test can both flip
 // the response for a later refetch and count reads.
-function installBackend(status: SourceStatus) {
+function installBackend(status: SourceStatus, options: { entriesFail?: boolean } = {}) {
   const calls: string[] = [];
+  const methods: string[] = [];
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
       calls.push(url);
+      methods.push(method);
       if (url.endsWith("/api/v1/source/status")) return makeResponse(200, status);
       if (url.includes("/api/v1/entries")) {
+        if (options.entriesFail) return makeResponse(500, { error: "library read failed" });
         return makeResponse(200, { entries: [], total: 0, page: 1, has_more: false });
       }
       if (url.endsWith("/api/v1/genres")) return makeResponse(200, { genres: [] });
@@ -52,6 +56,14 @@ function installBackend(status: SourceStatus) {
         return makeResponse(200, { total_titles: 0, total_providers: 0, total_genres: 0 });
       }
       if (url.endsWith("/api/v1/channels/categories")) return makeResponse(200, { categories: [] });
+      // The scan START: a POST to the bare scan URL answers 202 with the
+      // running status, so a test can prove the scan was really requested.
+      if (url.endsWith("/api/v1/channels/scan") && method === "POST") {
+        return makeResponse(202, {
+          status: { state: "running", total: 0, probed: 0, alive: 0, dead: 0, has_report: false },
+          message: "scan started",
+        });
+      }
       if (url.includes("/api/v1/channels/scan/status")) {
         return makeResponse(200, {
           status: { state: "idle", total: 0, probed: 0, alive: 0, dead: 0, has_report: false },
@@ -64,11 +76,15 @@ function installBackend(status: SourceStatus) {
     }),
   );
   const statusReads = () => calls.filter((u) => u.endsWith("/api/v1/source/status")).length;
-  return { calls, statusReads };
+  // A method-aware count: only the scan POST targets the bare scan URL, so this
+  // proves the POST fired rather than merely that a panel rendered.
+  const scanPosts = () =>
+    calls.filter((u, i) => u.endsWith("/api/v1/channels/scan") && methods[i] === "POST").length;
+  return { calls, statusReads, scanPosts };
 }
 
-function renderDashboard(status: SourceStatus) {
-  const backend = installBackend(status);
+function renderDashboard(status: SourceStatus, options: { entriesFail?: boolean } = {}) {
+  const backend = installBackend(status, options);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={queryClient}>
@@ -134,5 +150,37 @@ describe("Dashboard stream health tab", () => {
       expect(screen.queryByRole("heading", { name: /stream health scan/i })).not.toBeInTheDocument(),
     );
     expect(screen.queryByRole("button", { name: /stream health/i })).not.toBeInTheDocument();
+  });
+
+  // The reviewer's defect: a failing VOD read used to replace EVERY panel, so
+  // the user whose library is broken could not reach the diagnostic they need.
+  it("keeps the health tab reachable and its scan runnable when the VOD read fails", async () => {
+    const { backend } = renderDashboard(makeStatus({ health_scan_supported: true }), {
+      entriesFail: true,
+    });
+
+    // The health tab is still offered even though /entries failed: the tab bar
+    // is not gated on the library read.
+    fireEvent.click(await screen.findByRole("button", { name: /stream health/i }));
+    // Positive: the scan panel really mounted despite the library failure.
+    expect(await screen.findByRole("heading", { name: /stream health scan/i })).toBeInTheDocument();
+    // The inline note explains the missing catalogue without reproducing the
+    // full source-error panel inside the health tab.
+    expect(await screen.findByText(/video library could not be read/i)).toBeInTheDocument();
+
+    // Positive: a scan can actually be STARTED, not merely displayed — assert
+    // the POST reached the backend, not just that a button rendered.
+    fireEvent.click(screen.getByRole("button", { name: /scan now/i }));
+    await waitFor(() => expect(backend.scanPosts()).toBeGreaterThan(0));
+  });
+
+  // The pairing that keeps the test above honest: in the very same failed-read
+  // state, a non-health tab keeps its current behaviour and shows the
+  // source-error panel.
+  it("still shows the source-error panel on a non-health tab when the VOD read fails", async () => {
+    renderDashboard(makeStatus({ health_scan_supported: true }), { entriesFail: true });
+
+    expect(await screen.findByRole("heading", { name: /something went wrong/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /stream health scan/i })).not.toBeInTheDocument();
   });
 });
