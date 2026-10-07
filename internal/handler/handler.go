@@ -696,7 +696,7 @@ func (s *scanState) resetLocked(active source.Source) {
 	s.source = active
 	s.mgr = nil
 	s.err = nil
-	lister, ok := active.(source.StreamProbeLister)
+	lister, ok := source.HealthScanLister(active)
 	if !ok {
 		s.err = source.UnsupportedScanError(scanSourceName(active))
 		return
@@ -726,6 +726,16 @@ func scanSourceName(src source.Source) string {
 // gets a working scan, not a 501 for the rest of the process's life.
 func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
 	return h.scan.managerFor(h.src())
+}
+
+// HealthScanSupported reports whether the ACTIVE source can enumerate its
+// library's streams for health probing — the same capability check the scan
+// endpoints make (source.HealthScanLister). Status reports it so the client can
+// gate the scan entry point honestly instead of calling an endpoint and
+// reading a 501. It never constructs a manager or starts a scan.
+func (h *PlayerHandler) HealthScanSupported() bool {
+	_, ok := source.HealthScanLister(h.src())
+	return ok
 }
 
 // CancelActiveScan cancels an in-flight scan, if one was ever started. The

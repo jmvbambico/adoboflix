@@ -301,6 +301,10 @@ export interface SourceStatus {
   needs_playlist_code: boolean;
   playlist_code_configured: boolean;
   playlist_file_configured: boolean;
+  // health_scan_supported is true exactly when the active source can enumerate
+  // its library's streams for health probing. It gates the scan entry point:
+  // false means a scan call would answer 501, so the UI must not offer one.
+  health_scan_supported: boolean;
   modes: SourceMode[];
   // playlist_imported_at is RFC3339 and present only when this server imported
   // the stored playlist itself. An ADOBOFLIX_FILE_PATH playlist and the

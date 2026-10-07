@@ -194,6 +194,10 @@ func loginFromEnv(ctx context.Context, username, password string) (string, error
 //     describing the active source.
 //   - playlist_file_configured — whether an imported playlist (or
 //     ADOBOFLIX_FILE_PATH) is available for the file mode.
+//   - health_scan_supported — whether the ACTIVE source can enumerate its
+//     library's streams for health probing (source.StreamProbeLister), so the
+//     client can offer or withhold the scan entry point without calling an
+//     endpoint and reading a 501. It describes only the active source.
 //   - playlist_imported_at — RFC3339, the stored imported playlist's mtime.
 //     Present only when this server imported the playlist itself; omitted for
 //     an ADOBOFLIX_FILE_PATH playlist and when nothing is imported, so an
@@ -655,6 +659,7 @@ func (h *SourceHandler) statusBody() gin.H {
 		"needs_playlist_code":      needs,
 		"playlist_code_configured": configured,
 		"playlist_file_configured": h.fileConfigured(),
+		"health_scan_supported":    h.player.HealthScanSupported(),
 		"modes":                    h.modesStatus(active),
 	}
 	// Only a playlist the user imported here has an import time; a playlist
