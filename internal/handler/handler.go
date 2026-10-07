@@ -24,6 +24,7 @@ type PlayerHandler struct {
 	source *swappableSource
 	epg    atomic.Pointer[epg.Service]
 	creds  *credentialStore
+	scan   scanState
 }
 
 // swappableSource holds the active source behind an atomic pointer. Reads are
@@ -63,13 +64,18 @@ func (h *PlayerHandler) src() source.Source { return h.source.Load() }
 // the new one, so the guide is fetched with the new credential rather than the
 // previous adapter's. A swap to a source without the EPG capability leaves EPG
 // reporting itself unavailable, exactly as a source that never had it.
+//
+// It also invalidates the health-scan manager: a scan built for the previous
+// source must stop probing it and can never have its report served as the new
+// source's. See scanState.invalidate.
 func (h *PlayerHandler) SwapSource(src source.Source) {
 	h.source.Store(src)
 	if provider, ok := src.(source.CompiledEPGProvider); ok {
 		h.epg.Store(epg.NewService(provider))
-		return
+	} else {
+		h.epg.Store(nil)
 	}
-	h.epg.Store(nil)
+	h.scan.invalidate(src)
 }
 
 func (h *PlayerHandler) WithEPG(service *epg.Service) *PlayerHandler {
@@ -622,38 +628,104 @@ func (h *PlayerHandler) GetChannelEPG(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-// Scan state is held in a package-level manager so the scan handlers stay
-// self-contained (they are the only handler code this feature owns). The
-// manager is published through an atomic pointer so the shutdown path can
-// reach it without racing the lazy construction.
-var (
-	scanMgrOnce sync.Once
-	scanMgrPtr  atomic.Pointer[scanner.Manager]
-	scanMgrErr  error
-)
+// scanState is the per-handler health-scan lifecycle. A scan manager is a
+// capability of ONE source adapter — it enumerates that adapter's streams — so
+// it must follow whichever source is active, not be built once for the process.
+// It is held on the handler rather than in a package global so two
+// PlayerHandlers in the same process (the server and a test, say) cannot share
+// a manager or leak scan state into each other.
+//
+// The manager is keyed by the source VALUE compared with ==. For every adapter
+// that is pointer identity: reopening the same adapter name with a different
+// playlist code is a different pointer, so it gets a fresh manager rather than
+// reusing the previous one. (Every Source implementation is a pointer or the
+// empty unconfigured struct, so == is always safe.) A source that cannot
+// enumerate its streams has no manager; its unsupported error is memoised here
+// instead — for as long as THAT source stays active, never for the process.
+type scanState struct {
+	mu     sync.Mutex
+	built  bool
+	source source.Source
+	mgr    *scanner.Manager
+	err    error
+}
 
-// scanManager builds the scan manager from the active source. Health scanning
+// managerFor returns the scan manager for active, building it the first time
+// and rebuilding whenever active's identity changes. When the active source has
+// changed, any manager built for the previous source is cancelled — an
+// in-flight scan must stop probing an adapter that is no longer active — and
+// discarded, so its (partial or complete) report can never be served as the new
+// source's.
+func (s *scanState) managerFor(active source.Source) (*scanner.Manager, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.built || s.source != active {
+		s.resetLocked(active)
+	}
+	return s.mgr, s.err
+}
+
+// invalidate cancels and drops a manager built for a source other than current,
+// so a swap stops an in-flight scan promptly instead of at the next scan
+// request. A manager already built for current — including the "no scan was
+// ever requested" state — is left untouched. Called from SwapSource after the
+// new source is stored.
+func (s *scanState) invalidate(current source.Source) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.built || s.source == current {
+		return
+	}
+	if s.mgr != nil {
+		s.mgr.Cancel()
+	}
+	s.built = false
+	s.source = nil
+	s.mgr = nil
+	s.err = nil
+}
+
+// resetLocked cancels and drops any existing manager, then records active's
+// capability: a manager when it can enumerate the library's streams, and the
+// unsupported error when it cannot. Callers must hold s.mu.
+func (s *scanState) resetLocked(active source.Source) {
+	if s.mgr != nil {
+		s.mgr.Cancel()
+	}
+	s.built = true
+	s.source = active
+	s.mgr = nil
+	s.err = nil
+	lister, ok := active.(source.StreamProbeLister)
+	if !ok {
+		s.err = source.UnsupportedScanError(scanSourceName(active))
+		return
+	}
+	s.mgr = scanner.NewManager(lister)
+}
+
+// scanSourceName names a source for the unsupported error, tolerating a nil
+// (sourceless) adapter.
+func scanSourceName(src source.Source) string {
+	if src == nil {
+		return ""
+	}
+	return src.Name()
+}
+
+// scanManager returns the scan manager for the ACTIVE source. Health scanning
 // is an OPTIONAL source capability: a source that cannot enumerate the whole
 // library's streams (an HTTP adapter that only ever sees one user's playlist,
 // say) yields a clear unsupported error. The handler never reaches around the
 // adapter for a database handle — the capability, or its absence, is the
 // whole boundary.
+//
+// The manager is rebuilt whenever the active source changes identity, and an
+// error from a previous source is never cached past that source's tenure: a
+// user who first hits a non-scannable source and then imports a local playlist
+// gets a working scan, not a 501 for the rest of the process's life.
 func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
-	scanMgrOnce.Do(func() {
-		// Load the source once: a swap between the assertion and Name() would
-		// otherwise let the error name a different adapter than the one tested.
-		src := h.src()
-		lister, ok := src.(source.StreamProbeLister)
-		if !ok {
-			scanMgrErr = source.UnsupportedScanError(src.Name())
-			return
-		}
-		scanMgrPtr.Store(scanner.NewManager(lister))
-	})
-	if scanMgrErr != nil {
-		return nil, scanMgrErr
-	}
-	return scanMgrPtr.Load(), nil
+	return h.scan.managerFor(h.src())
 }
 
 // CancelActiveScan cancels an in-flight scan, if one was ever started. The
@@ -661,11 +733,13 @@ func (h *PlayerHandler) scanManager() (*scanner.Manager, error) {
 // running out their per-probe deadlines and the five-minute scan budget.
 //
 // It deliberately does NOT construct the manager: when no scan was ever
-// requested the pointer is nil and this is a harmless no-op. Shutdown must
+// requested the manager is nil and this is a harmless no-op. Shutdown must
 // never bring a manager — or the lister capability behind it — into existence.
-func CancelActiveScan() {
-	if m := scanMgrPtr.Load(); m != nil {
-		m.Cancel()
+func (h *PlayerHandler) CancelActiveScan() {
+	h.scan.mu.Lock()
+	defer h.scan.mu.Unlock()
+	if h.scan.mgr != nil {
+		h.scan.mgr.Cancel()
 	}
 }
 
