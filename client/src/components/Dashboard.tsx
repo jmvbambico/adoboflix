@@ -27,10 +27,12 @@ import SourceStatusPanel from "./SourceStatusPanel";
 import PlaylistCodeGate from "./PlaylistCodeGate";
 import { useSourceStatus } from "./playlistCode";
 import { describeChannelStatus } from "./channelStatus";
+import StreamHealthPanel from "./StreamHealthPanel";
+import { healthScanTabAvailable, resolveDashboardTab, type DashboardTab } from "./scanHealth";
 import { 
   Play, Plus, Heart, Compass, History, Star, 
   ChevronDown, ChevronRight, CircleCheck, Film, ListFilter, Users, BookOpen,
-  Tv, X, Sparkles
+  Tv, X, Sparkles, Activity
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -87,8 +89,24 @@ export default function Dashboard() {
   };
   
   
-  // Navigation tabs: 'browse' (VOD Catalog) or 'iptv' (Live IPTV) or 'watchlist' or 'history'
-  const [activeTab, setActiveTab] = useState<"browse" | "iptv" | "watchlist" | "history">("browse");
+  // Navigation tabs: 'browse' (VOD Catalog) or 'iptv' (Live IPTV) or 'watchlist'
+  // or 'history' or 'health' (stream health scan, when the source supports it).
+  const [activeTab, setActiveTab] = useState<DashboardTab>("browse");
+
+  // Health scanning is a capability of the ACTIVE source. When the source cannot
+  // be scanned the tab is not offered at all, and resolveDashboardTab keeps a
+  // user who is already on it from being stranded if the source swaps to a
+  // non-scannable one underneath them.
+  const healthScanAvailable = healthScanTabAvailable(sourceStatus);
+  const activeTabView = resolveDashboardTab(activeTab, healthScanAvailable);
+
+  // The health panel's own preconditions are an active source that reports
+  // health_scan_supported — both already folded into activeTabView by
+  // resolveDashboardTab. It deliberately does NOT depend on the VOD library
+  // read: a user whose /entries call is failing is exactly the user who needs
+  // the scanner, so the panel stays reachable while the other tabs show the
+  // source-error state.
+  const healthTabActive = activeTabView === "health";
 
   // Selected Movie for active cinematic playback details
   const [selectedVideo, setSelectedVideo] = useState<Video | null>(null);
@@ -1208,7 +1226,7 @@ export default function Dashboard() {
               <button
                 onClick={() => { setActiveTab("browse"); setSelectedCategory("All"); }}
                 className={`shrink-0 px-3.5 md:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  activeTab === "browse" 
+                  activeTabView === "browse" 
                     ? "bg-orange-600/25 border border-orange-500/30 text-orange-300 font-bold"
                     : "text-slate-400 hover:text-slate-200 border border-transparent"
                 }`}
@@ -1220,7 +1238,7 @@ export default function Dashboard() {
               <button
                 onClick={() => { setActiveTab("iptv"); setSelectedIptvCategory("All"); }}
                 className={`shrink-0 px-3.5 md:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  activeTab === "iptv" 
+                  activeTabView === "iptv" 
                     ? "bg-orange-600/25 border border-orange-500/30 text-orange-300 font-bold"
                     : "text-slate-400 hover:text-slate-200 border border-transparent"
                 }`}
@@ -1232,7 +1250,7 @@ export default function Dashboard() {
               <button
                 onClick={() => setActiveTab("watchlist")}
                 className={`shrink-0 px-3.5 md:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all relative flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  activeTab === "watchlist"
+                  activeTabView === "watchlist"
                     ? "bg-orange-600/25 border border-orange-500/30 text-orange-300 font-bold"
                     : "text-slate-400 hover:text-slate-200 border border-transparent"
                 }`}
@@ -1245,7 +1263,7 @@ export default function Dashboard() {
               <button
                 onClick={() => setActiveTab("history")}
                 className={`shrink-0 px-3.5 md:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
-                  activeTab === "history"
+                  activeTabView === "history"
                     ? "bg-orange-600/25 border border-orange-500/30 text-orange-300 font-bold"
                     : "text-slate-400 hover:text-slate-200 border border-transparent"
                 }`}
@@ -1254,13 +1272,31 @@ export default function Dashboard() {
                 Watch History
               </button>
 
+              {/* Stream Health is offered only when the active source can be
+                  scanned. adobotv-http cannot enumerate the whole library by
+                  design, so the tab is absent there rather than leading to a
+                  501. */}
+              {healthScanAvailable && (
+                <button
+                  onClick={() => setActiveTab("health")}
+                  className={`shrink-0 px-3.5 md:px-4 py-2 rounded-lg text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                    activeTabView === "health"
+                      ? "bg-orange-600/25 border border-orange-500/30 text-orange-300 font-bold"
+                      : "text-slate-400 hover:text-slate-200 border border-transparent"
+                  }`}
+                >
+                  <Activity className="w-4 h-4 shrink-0" />
+                  Stream Health
+                </button>
+              )}
+
               {/* Vertical divider — only shown when pills are active */}
-              {(activeTab === "browse" || activeTab === "iptv") && (
+              {(activeTabView === "browse" || activeTabView === "iptv") && (
                 <div className="shrink-0 w-px h-5 bg-white/10 mx-1" />
               )}
 
               {/* Inline genre pills for Browse tab */}
-              {activeTab === "browse" && (
+              {activeTabView === "browse" && (
                 <div className="flex items-center gap-1">
                   {(() => {
                     const sorted = sortByPopularity(categories, GENRE_POPULARITY);
@@ -1301,7 +1337,7 @@ export default function Dashboard() {
               )}
 
               {/* Inline feed-type pills for IPTV tab */}
-              {activeTab === "iptv" && (
+              {activeTabView === "iptv" && (
                 <div className="flex items-center gap-1">
                   {(() => {
                     const sorted = sortByPopularity(iptvCategories, CHANNEL_CATEGORY_POPULARITY);
@@ -1343,7 +1379,7 @@ export default function Dashboard() {
             </div>
 
             {/* Browse category accordion — expands below the tab bar row */}
-            {activeTab === "browse" && (() => {
+            {activeTabView === "browse" && (() => {
               const sorted = sortByPopularity(categories, GENRE_POPULARITY);
               const remaining = sorted.slice(PILL_VISIBLE_COUNT);
               if (remaining.length === 0) return null;
@@ -1372,7 +1408,7 @@ export default function Dashboard() {
             })()}
 
             {/* IPTV category accordion — expands below the tab bar row */}
-            {activeTab === "iptv" && (() => {
+            {activeTabView === "iptv" && (() => {
               const sorted = sortByPopularity(iptvCategories, CHANNEL_CATEGORY_POPULARITY);
               const remaining = sorted.slice(PILL_VISIBLE_COUNT);
               if (remaining.length === 0) return null;
@@ -1403,16 +1439,16 @@ export default function Dashboard() {
 
           {/* DYNAMIC LIST FEED BY SELECTED TABS */}
           <div className="w-full">
-            {isLoading ? (
+            {isLoading && !healthTabActive ? (
               <div className="flex flex-col gap-4 py-20 justify-center items-center w-full">
                 <SpinnerOverlay />
                 <span className="text-xs font-mono text-violet-400 animate-pulse uppercase tracking-widest">Constructing glass lattice pipelines...</span>
               </div>
-            ) : libraryUnavailable ? (
+            ) : libraryUnavailable && !healthTabActive ? (
               <SourceStatusPanel error={videosError} onRetry={() => { void refetchVideos(); }} />
             ) : (
               <AnimatePresence mode="popLayout">
-                {activeTab === "browse" && (
+                {activeTabView === "browse" && (
                   <motion.div
                     key="browse-panel"
                     initial={{ opacity: 0, y: 10 }}
@@ -1475,7 +1511,7 @@ export default function Dashboard() {
                   </motion.div>
                 )}
 
-                {activeTab === "iptv" && (
+                {activeTabView === "iptv" && (
                   <motion.div
                     key="iptv-panel"
                     initial={{ opacity: 0, y: 10 }}
@@ -1618,7 +1654,7 @@ export default function Dashboard() {
                   </motion.div>
                 )}
 
-                {activeTab === "watchlist" && (
+                {activeTabView === "watchlist" && (
                   <motion.div
                     key="watchlist-panel"
                     initial={{ opacity: 0, y: 10 }}
@@ -1664,7 +1700,7 @@ export default function Dashboard() {
                   </motion.div>
                 )}
 
-                {activeTab === "history" && (
+                {activeTabView === "history" && (
                   <motion.div
                     key="history-panel"
                     initial={{ opacity: 0, y: 10 }}
@@ -1749,6 +1785,31 @@ export default function Dashboard() {
                         })}
                       </div>
                     )}
+                  </motion.div>
+                )}
+
+                {activeTabView === "health" && (
+                  <motion.div
+                    key="health-panel"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.3 }}
+                  >
+                    {/* The health scanner talks only to /channels/scan*, so a
+                        failed VOD library read does not stop it. Say so in one
+                        line rather than reproducing the big source-error panel
+                        here. */}
+                    {libraryUnavailable && (
+                      <p
+                        role="status"
+                        className="mb-4 rounded-2xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-xs text-amber-200/90"
+                      >
+                        The video library could not be read, so the catalogue tabs are unavailable.
+                        The health scanner uses only the scan endpoints, so it still works.
+                      </p>
+                    )}
+                    <StreamHealthPanel />
                   </motion.div>
                 )}
               </AnimatePresence>

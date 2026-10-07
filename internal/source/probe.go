@@ -36,6 +36,22 @@ type StreamProbeLister interface {
 	ListStreamsForProbe() ([]ProbeTarget, error)
 }
 
+// HealthScanLister returns src as a StreamProbeLister when it implements the
+// optional capability, with ok=false otherwise. It is the single capability
+// check behind both the scan endpoints and the source-status
+// health_scan_supported flag, so the two can never disagree. It performs no I/O
+// and starts nothing.
+//
+// A nil Interface reports (nil, false); a typed-nil pointer is not detected
+// because it never reaches the active source in practice.
+func HealthScanLister(src Source) (StreamProbeLister, bool) {
+	if src == nil {
+		return nil, false
+	}
+	lister, ok := src.(StreamProbeLister)
+	return lister, ok
+}
+
 // UnsupportedScanError is the honest error a caller reports when the active
 // source does not implement StreamProbeLister. It names the source and says
 // plainly that scanning is unsupported for it, so the user sees why the scan

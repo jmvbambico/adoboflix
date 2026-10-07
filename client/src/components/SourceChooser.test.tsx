@@ -37,6 +37,7 @@ function status(modes: SourceMode[], overrides: Partial<SourceStatus> = {}): Sou
     needs_playlist_code: false,
     playlist_code_configured: false,
     playlist_file_configured: false,
+    health_scan_supported: false,
     modes,
     ...overrides,
   };

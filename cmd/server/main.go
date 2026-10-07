@@ -335,7 +335,7 @@ func main() {
 
 	// Cancel an in-flight scan before waiting on HTTP shutdown. This is a no-op
 	// when no scan was ever requested — it never constructs the scan manager.
-	handler.CancelActiveScan()
+	playerHandler.CancelActiveScan()
 
 	// Stop both background jobs and wait for them, so no goroutine outlives the
 	// process. Cancelling bgCtx reaches the re-check's upstream read through the
