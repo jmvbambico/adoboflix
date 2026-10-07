@@ -76,6 +76,28 @@ var (
 	// ErrUpstream is the transport/status catch-all. Concrete gate failures
 	// above are preferred wherever the cause is known.
 	ErrUpstream = errors.New("adobotv-http: AdoboTV request failed")
+
+	// ErrInvalidCredentials is returned when AdoboTV's login endpoint (POST
+	// /v1/auth/login) refuses a username/password pair with HTTP 401. AdoboTV
+	// returns the same 401 for an unknown username and a wrong password,
+	// deliberately, so this error does not distinguish them — and neither must
+	// a caller's response, or the endpoint becomes an account-enumeration
+	// oracle.
+	ErrInvalidCredentials = errors.New("adobotv-http: AdoboTV rejected the username or password")
+
+	// ErrRecaptchaRequired is returned when AdoboTV's login endpoint demands a
+	// reCAPTCHA token the caller cannot supply (HTTP 403, "reCAPTCHA token is
+	// required"). It is its own sentinel because it is not a credential
+	// failure: the password may be perfectly correct, and reporting it as a bad
+	// password would send the user to change a working one.
+	ErrRecaptchaRequired = errors.New("adobotv-http: AdoboTV requires a reCAPTCHA token for login")
+
+	// ErrProfileWithoutPlaylistCode is returned when login succeeds but the
+	// authenticated profile carries no playlist code, so there is no credential
+	// to store. It is deliberately distinct from ErrNoPlaylistCode, which means
+	// the adapter has no code configured at all: here AdoboTV authenticated the
+	// account and simply has none to hand over.
+	ErrProfileWithoutPlaylistCode = errors.New("adobotv-http: the AdoboTV profile carries no playlist code")
 )
 
 // classifyGate maps an upstream refusal message onto the adapter's gate

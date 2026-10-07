@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   clearPlaylistCode,
   fetchSourceStatus,
   isApiError,
+  loginToAdoboTV,
   setPlaylistCode,
   syncSource,
   type SourceStatus,
@@ -71,37 +72,44 @@ export type PlaylistCodeOutcome =
   | { kind: "failed"; copy: SourceStatusCopy }
   | null;
 
-// usePlaylistCodeController owns the status query and the submit/clear
-// mutations, including the subtle "the server kept the code" branch and the
-// optimistic status-cache updates that keep a remount from asking for a code
-// the server already saved.
+// usePlaylistCodeController owns the status query and the connect mutations —
+// submitting a playlist code, or logging in with a username and password — plus
+// the subtle "the server kept the credential" branch and the optimistic
+// status-cache updates that keep a remount from asking for a credential the
+// server already saved.
+//
+// Both connect paths share the same success and failure handling because both
+// end in a playlist code: logging in stores the code the profile carried, so a
+// login is a playlist-code connect the user did not have to type. The failure
+// vocabulary is therefore shared too — a saved-but-gated login recovers exactly
+// as a saved-but-gated typed code does.
 export function usePlaylistCodeController() {
   const queryClient = useQueryClient();
   const [outcome, setOutcome] = useState<PlaylistCodeOutcome>(null);
 
   const statusQuery = useSourceStatus();
 
-  const submit = useMutation<SourceStatus, unknown, string>({
-    mutationFn: (value: string) => setPlaylistCode(value),
-    onSuccess: () => {
-      // The server already validated the code and swapped the adapter. Drop
-      // every cached answer so the library refetches against the new source;
-      // a page reload would throw away the session for nothing.
-      queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
-        prev ? { ...prev, playlist_code_configured: true } : prev,
-      );
-      queryClient.invalidateQueries();
-      setOutcome(null);
-    },
-    onError: (error) => {
-      // A gate that proves the code valid leaves it persisted; the rest persist
-      // nothing and the user must correct the code.
+  const handleConnected = useCallback(() => {
+    // The server already validated the credential and swapped the adapter. Drop
+    // every cached answer so the library refetches against the new source; a
+    // page reload would throw away the session for nothing.
+    queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
+      prev ? { ...prev, playlist_code_configured: true } : prev,
+    );
+    queryClient.invalidateQueries();
+    setOutcome(null);
+  }, [queryClient]);
+
+  const onConnectFailed = useCallback(
+    (error: unknown) => {
+      // A gate that proves the credential valid leaves it persisted; the rest
+      // persist nothing and the user must correct it.
       if (isApiError(error) && error.code && SAVED_GATE_CODES.has(error.code)) {
-        // The server kept the code, so record that in the status cache too.
-        // Without this the cache still says "not configured", and a remount
-        // inside the stale window would ask for a code that is already saved —
-        // exactly the retype this feature exists to prevent. Invalidate the
-        // status key as well so a fresh read replaces the optimistic one.
+        // The server kept the credential, so record that in the status cache
+        // too. Without this the cache still says "not configured", and a remount
+        // inside the stale window would ask for a credential that is already
+        // saved — exactly the retype this feature exists to prevent. Invalidate
+        // the status key as well so a fresh read replaces the optimistic one.
         queryClient.setQueryData<SourceStatus>(SOURCE_STATUS_QUERY_KEY, (prev) =>
           prev ? { ...prev, playlist_code_configured: true } : prev,
         );
@@ -110,6 +118,39 @@ export function usePlaylistCodeController() {
         return;
       }
       setOutcome({ kind: "failed", copy: describeSourceError(error) });
+    },
+    [queryClient],
+  );
+
+  const submit = useMutation<SourceStatus, unknown, string>({
+    mutationFn: (value: string) => setPlaylistCode(value),
+    onSuccess: handleConnected,
+    onError: onConnectFailed,
+  });
+
+  // The password must never enter React Query's mutation state: a Mutation
+  // record keeps its variables in the cache until garbage collection, outliving
+  // the request. It must also not live in one shared slot, because two logins in
+  // flight would race for it and a request could pair one call's username with
+  // another's password. So the secret is keyed per call — the variables carry
+  // the username and a per-call id, and the password is parked under that id in
+  // a map only the mutation function reads.
+  const secrets = useRef(new Map<string, string>());
+  // A monotonic counter keys those secrets. Unique within this hook instance —
+  // the only place the map is read — and deterministic, so a test can read an
+  // id off a mutation record without relying on a runtime crypto API.
+  const nextSecretId = useRef(0);
+
+  const login = useMutation<SourceStatus, unknown, { id: string; username: string }>({
+    mutationFn: ({ id, username }) => loginToAdoboTV(username, secrets.current.get(id) ?? ""),
+    onSuccess: handleConnected,
+    onError: onConnectFailed,
+    // Declared here, in the options object, NOT passed to mutate(): React Query
+    // drops a mutate()-level callback when the observer unmounts before the
+    // request settles, so a per-call clear would leave the secret in the map for
+    // good. The options-level callbacks run on every settle path regardless.
+    onSettled: (_data, _error, variables) => {
+      secrets.current.delete(variables.id);
     },
   });
 
@@ -138,7 +179,28 @@ export function usePlaylistCodeController() {
     [submit],
   );
 
-  return { statusQuery, submit, clear, submitCode, outcome, setOutcome };
+  // submitLogin keeps the password out of React Query entirely: the secret is
+  // parked in the ref map under a per-call id and dropped by the mutation's
+  // options-level onSettled when it settles — even if this component unmounted
+  // first. Resetting the observer on settle was not enough — reset() drops no
+  // variables, and the Mutation record keeps them in the cache until collection —
+  // and a single shared slot let two in-flight logins overwrite one another.
+  const submitLogin = useCallback(
+    (username: string, password: string, onConnected?: () => void) => {
+      const id = String(nextSecretId.current++);
+      secrets.current.set(id, password);
+      login.mutate(
+        { id, username },
+        {
+          onSuccess: () => onConnected?.(),
+          onSettled: () => login.reset(),
+        },
+      );
+    },
+    [login],
+  );
+
+  return { statusQuery, submit, login, clear, submitCode, submitLogin, outcome, setOutcome };
 }
 
 // useSourceSync owns the manual "Sync now" action. It is separate from the

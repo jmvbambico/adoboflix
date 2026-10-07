@@ -93,6 +93,40 @@ const COPY: Record<string, SourceStatusCopy> = {
     hint: "Check the configured playlist code, then try again.",
     retryLabel: "Try again",
   },
+  // The login endpoint refused the username/password pair. AdoboTV returns one
+  // 401 for an unknown username and a wrong password alike, to prevent
+  // enumeration, and AdoboFlix preserves that — so the copy must not guess which
+  // field was wrong.
+  invalid_credentials: {
+    severity: "blocked",
+    title: "AdoboTV did not accept those credentials",
+    message:
+      "AdoboTV refused that username and password. It does not say which was wrong — deliberately, to prevent account enumeration.",
+    hint: "Check both the username and the password, then try again.",
+    retryLabel: "Try again",
+  },
+  // AdoboTV demands a reCAPTCHA token AdoboFlix cannot mint. Distinct from
+  // invalid_credentials on purpose: the password may be perfectly correct, and
+  // telling the user otherwise would send them to change a working one.
+  captcha_required: {
+    severity: "blocked",
+    title: "AdoboTV requires a captcha to log in",
+    message:
+      "This AdoboTV server requires a reCAPTCHA token for password logins, and AdoboFlix cannot supply one. Your password has not been rejected — this is an AdoboTV configuration, not a wrong password.",
+    hint: "Ask the AdoboTV operator to allow API logins, or sign in with a playlist code instead.",
+    retryLabel: "Use a playlist code",
+  },
+  // The login succeeded but the account has no playlist code to read, so there
+  // is nothing to store. Distinct from playlist_code_required: that asks the
+  // user for a code; here the account simply has none.
+  account_without_playlist_code: {
+    severity: "blocked",
+    title: "This AdoboTV account has no playlist code",
+    message:
+      "AdoboTV accepted the login, but the account carries no playlist code, so there is nothing for AdoboFlix to connect with.",
+    hint: "Ask the AdoboTV operator to assign a playlist code to this account, then try again.",
+    retryLabel: "Try again",
+  },
   user_agent_rejected: {
     severity: "blocked",
     title: "This player is not on the allowlist",

@@ -333,6 +333,16 @@ export function setPlaylistCode(code: string): Promise<SourceStatus> {
   return sendJSON<SourceStatus>("POST", `${API_BASE}/source/playlist-code`, { code });
 }
 
+// Log in to AdoboTV with a username and password. The AdoboFlix server — not
+// the browser — talks to AdoboTV: it authenticates, reads the account's
+// playlist code from the authenticated profile, and stores that, so the code
+// stays the only credential kept. The password rides in the request body only,
+// is never persisted, logged, or echoed, and is dropped the moment the request
+// settles.
+export function loginToAdoboTV(username: string, password: string): Promise<SourceStatus> {
+  return sendJSON<SourceStatus>("POST", `${API_BASE}/source/login`, { username, password });
+}
+
 // Clear a stored code and reopen the source from whatever configuration
 // remains (an environment fallback, or the unconfigured state).
 export function clearPlaylistCode(): Promise<SourceStatus> {

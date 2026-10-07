@@ -85,6 +85,11 @@ type SourceHandler struct {
 	// open reopens an adapter from a configuration. It is a field so tests can
 	// exercise the endpoints without a live AdoboTV.
 	open func(source.Config) (source.Source, error)
+	// login authenticates a username/password against AdoboTV and returns the
+	// account's playlist code, which is then stored and swapped exactly as a
+	// typed-in code is. It is a field so tests can exercise the endpoint without
+	// a live AdoboTV; production wires it to the adapter's real login client.
+	login func(ctx context.Context, username, password string) (string, error)
 	// sessionWindow is how long a stored playlist code is trusted before it is
 	// re-checked against AdoboTV. Zero or negative disables the re-check, so the
 	// credential is trusted until the user disconnects it. It is a duration, not
@@ -126,6 +131,10 @@ type SourceHandlerOptions struct {
 	EnvFilePath string
 	// EnvSource is the ADOBOFLIX_SOURCE override, "" when unset.
 	EnvSource string
+	// Login authenticates a username/password against AdoboTV and returns the
+	// account's playlist code. Nil builds one from the process environment
+	// (ADOBOFLIX_ADOBOTV_BASE_URL), which is what production uses.
+	Login func(ctx context.Context, username, password string) (string, error)
 	// SessionWindow is how long a stored playlist code is trusted before it is
 	// re-checked. Zero disables the re-check. See DefaultSessionWindow.
 	SessionWindow time.Duration
@@ -140,6 +149,10 @@ func NewSourceHandler(opts SourceHandlerOptions) *SourceHandler {
 	if clock == nil {
 		clock = time.Now
 	}
+	login := opts.Login
+	if login == nil {
+		login = loginFromEnv
+	}
 	return &SourceHandler{
 		player:        opts.Player,
 		cfg:           opts.Config,
@@ -150,9 +163,22 @@ func NewSourceHandler(opts SourceHandlerOptions) *SourceHandler {
 		envFile:       opts.EnvFilePath,
 		envSource:     opts.EnvSource,
 		open:          source.Open,
+		login:         login,
 		sessionWindow: opts.SessionWindow,
 		now:           clock,
 	}
+}
+
+// loginFromEnv authenticates against AdoboTV using the process environment's
+// base URL and User-Agent. The client is built per call — it opens no
+// connection until it is used — so no credential state is held between
+// requests.
+func loginFromEnv(ctx context.Context, username, password string) (string, error) {
+	client, err := adobotvhttp.NewLoginClientFromEnv()
+	if err != nil {
+		return "", err
+	}
+	return client.Login(ctx, username, password)
 }
 
 // GetStatus reports how the source is currently configured. It never returns
@@ -259,6 +285,81 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 		return
 	}
 
+	h.applyPlaylistCode(c, code)
+}
+
+// Login connects an AdoboTV account by username and password. It authenticates
+// against AdoboTV, reads the account's playlist code from the authenticated
+// profile, and hands that code to the same store-and-swap path the playlist-code
+// endpoint uses. Everything downstream — the weekly re-check, the daily sync,
+// the gate classification, the device-pending handling — is unchanged, because
+// it still operates on a playlist code; the user simply never types one.
+//
+// # The password
+//
+// The password is a credential more sensitive than the playlist code: it is
+// reusable and probably shared with other services. It exists only for the
+// duration of this request. It is placed in the login request body to AdoboTV
+// and nowhere else: never persisted (only the playlist code read from the
+// profile is), never logged (not its value; the adapter's errors never carry
+// it), and never placed in a response body or an error. The reference is
+// dropped as soon as the call returns.
+//
+// # Failure mapping
+//
+// AdoboTV returns one 401 for an unknown username and a wrong password alike,
+// to prevent enumeration; AdoboFlix preserves that, so its response never says
+// which was wrong. A 403 reCAPTCHA demand is its own code and message: the
+// password may be correct, and it must not read as a credential failure. A
+// transport failure persists nothing. All of these are mapped through the same
+// stable vocabulary as every other source error (see source_error.go).
+func (h *SourceHandler) Login(c *gin.Context) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "expected a JSON body with username and password fields"})
+		return
+	}
+	username := strings.TrimSpace(body.Username)
+	if username == "" || body.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing username or password"})
+		return
+	}
+
+	if h.pinned() && h.activeName() != adobotvhttp.Name {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "the content source is pinned by " + source.EnvSource + "; unset it to choose a source in the UI",
+			"code":  codeSourcePinnedByEnv,
+		})
+		return
+	}
+
+	code, err := h.login(c.Request.Context(), username, body.Password)
+	// Drop the password reference as soon as the call returns, so the intent is
+	// explicit even though Go's GC owns the memory from here.
+	body.Password = ""
+	if err != nil {
+		// Every error h.login can return is password-free by construction: the
+		// adapter names only a redacted URL, a status, or one of its sentinels.
+		log.Printf("source login: authenticating against AdoboTV: %v", err)
+		writeSourceError(c, err, "")
+		return
+	}
+
+	h.applyPlaylistCode(c, code)
+}
+
+// applyPlaylistCode is the shared tail of every way a playlist code arrives —
+// typed by the user (SetPlaylistCode) or read from the profile after a login
+// (Login). It validates the code against AdoboTV with one cheap real call,
+// persists it only when that call proves it valid, remembers the login mode, and
+// swaps the live source. It writes the response itself so both callers share one
+// behaviour and one set of stable codes.
+//
+// The code is never logged and never echoed: only its length is logged.
+func (h *SourceHandler) applyPlaylistCode(c *gin.Context, code string) {
 	// Validate before persisting or swapping: a wrong code must fail here, not
 	// on the user's first playback attempt. Nothing is written until it passes.
 	candidate, err := h.open(h.configWithCode(code))
@@ -270,12 +371,11 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 		})
 		return
 	}
-	// Validate before persisting or swapping: a wrong code must fail here, not
-	// on the user's first playback attempt. Whether the code is *kept* is a
-	// separate question — not "did the call succeed" but "did AdoboTV recognise
-	// the code". See playlistCodeProvenValid. The request's context is passed
-	// through, so where the adapter can honour one (source.ContextChannelLister,
-	// as adobotv-http does) a client that gives up cancels the validation with it.
+	// Whether the code is *kept* is a separate question from "did the call
+	// succeed" — it is "did AdoboTV recognise the code". See
+	// playlistCodeProvenValid. The request's context is passed through, so where
+	// the adapter can honour one (source.ContextChannelLister, as adobotv-http
+	// does) a client that gives up cancels the validation with it.
 	validationErr := validatePlaylistCode(c.Request.Context(), candidate)
 	if validationErr != nil && !playlistCodeProvenValid(validationErr) {
 		writeSourceError(c, validationErr, "")
@@ -306,7 +406,7 @@ func (h *SourceHandler) SetPlaylistCode(c *gin.Context) {
 	}
 	h.player.SwapSource(candidate)
 	// Log the length only: the code itself must never reach the log.
-	log.Printf("[source] playlist code entered for %q; source reopened (%d characters)", adobotvhttp.Name, len(code))
+	log.Printf("[source] playlist code accepted for %q; source reopened (%d characters)", adobotvhttp.Name, len(code))
 
 	if validationErr != nil {
 		// The code identified the subscriber; the gate is something other than

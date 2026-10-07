@@ -56,6 +56,22 @@ const (
 	// user re-imports. It is not a failure of the request, so the client can
 	// simply not offer sync where it is absent rather than showing an error.
 	codeSyncUnsupported = "sync_unsupported"
+
+	// codeInvalidCredentials is the login endpoint's answer when AdoboTV refuses
+	// a username/password pair. It deliberately does not say which of the two was
+	// wrong: AdoboTV returns one 401 for both to prevent account enumeration,
+	// and AdoboFlix preserves that — the code is the same either way.
+	codeInvalidCredentials = "invalid_credentials"
+	// codeCaptchaRequired is the login endpoint's answer when AdoboTV demands a
+	// reCAPTCHA token AdoboFlix cannot mint. It is distinct from
+	// invalid_credentials so the user is not told a correct password was wrong
+	// and sent to change it.
+	codeCaptchaRequired = "captcha_required"
+	// codeAccountWithoutPlaylistCode is the login endpoint's answer when the
+	// authenticated AdoboTV account carries no playlist code, so there is nothing
+	// to store. It is distinct from playlist_code_required: that asks the user
+	// for a code, whereas here the account has none to enter.
+	codeAccountWithoutPlaylistCode = "account_without_playlist_code"
 )
 
 // sourceErrorStatus maps an error returned by the active source to the HTTP
@@ -115,6 +131,21 @@ func sourceErrorStatus(err error) (int, string) {
 		return http.StatusForbidden, codePlaylistCodeRequired
 	case errors.Is(err, adobotvhttp.ErrUserAgentRejected):
 		return http.StatusForbidden, codeUserAgentRejected
+	case errors.Is(err, adobotvhttp.ErrInvalidCredentials):
+		// 401, matching AdoboTV's own status for a refused login. Its own code
+		// so the client shows "the credentials were refused" without a hint
+		// about which field was wrong — the enumeration guard AdoboTV applies
+		// and AdoboFlix preserves.
+		return http.StatusUnauthorized, codeInvalidCredentials
+	case errors.Is(err, adobotvhttp.ErrRecaptchaRequired):
+		// 403: understood and refused, and only a human (the AdoboTV operator)
+		// can clear it. Its own code and message so a correct password is never
+		// reported as wrong.
+		return http.StatusForbidden, codeCaptchaRequired
+	case errors.Is(err, adobotvhttp.ErrProfileWithoutPlaylistCode):
+		// 502: AdoboTV authenticated the user but its profile lacks the field
+		// AdoboFlix needs. That is an upstream data problem, not a bad request.
+		return http.StatusBadGateway, codeAccountWithoutPlaylistCode
 	case errors.Is(err, adobotvhttp.ErrPlaylistFormatM3U):
 		return http.StatusBadGateway, codePlaylistFormatM3U
 	case errors.Is(err, adobotvhttp.ErrContentNotFound):

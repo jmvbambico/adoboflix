@@ -62,7 +62,7 @@ Configuration is via environment variables (`.env`, documented in
 | `ADOBOFLIX_PG_URL` | — | PostgreSQL connection string (required by `postgres-direct`) |
 | `MPDUMPY_PG_URL` | — | Fallback PG URL, used if `ADOBOFLIX_PG_URL` is unset |
 | `ADOBOFLIX_ADOBOTV_BASE_URL` | — | AdoboTV base URL (required by `adobotv-http`) |
-| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (optional; the UI can enter one instead) |
+| `ADOBOFLIX_ADOBOTV_PLAYLIST_CODE` | — | Playlist code (optional; the UI can log in with a username/password, or enter a code directly) |
 | `ADOBOFLIX_PLAYLIST_CODE_FILE` | `.adoboflix/playlist-code` | Where a UI-entered playlist code is stored (0600) |
 | `ADOBOFLIX_PLAYLIST_REVALIDATE_INTERVAL` | `168h` | How long a stored playlist code is trusted before it is re-checked against AdoboTV. A re-check, not an expiry — see below. `0` disables it |
 | `ADOBOFLIX_PLAYLIST_FILE` | `.adoboflix/playlist` | Where a UI-imported playlist is stored (0600); the extension is added per format |
@@ -91,16 +91,43 @@ A source is chosen one of three ways, in this order:
 For `adobotv-http`, the subscriber's playlist code can come from either place,
 and **the file wins**:
 
-- **Entered in the UI** — saved to `ADOBOFLIX_PLAYLIST_CODE_FILE` (mode `0600`).
+- **Entered in the UI** — by signing in with an AdoboTV **username and
+  password**, or by typing a **playlist code** directly. Either way the code is
+  saved to `ADOBOFLIX_PLAYLIST_CODE_FILE` (mode `0600`).
 - **`ADOBOFLIX_ADOBOTV_PLAYLIST_CODE`** — the fallback, used only when no code
   has been stored.
 
 A UI-entered code is the user's most recent explicit instruction, so a stale
 `.env` value must not silently override it. The server boots with no code at
-all in this state, and the code-entry screen supplies one while it runs — no
+all in this state, and the login screen supplies one while it runs — no
 edit-and-restart. Clearing the stored code (DELETE `/api/v1/source/playlist-code`)
 falls back to the environment variable again. The code is never logged and
 never returned by any endpoint, not even masked.
+
+### Logging in with a username and password
+
+The **Login to AdoboTV** path takes a username and password, the same method the
+AdoboTV client uses. The AdoboFlix server — never the browser — calls AdoboTV's
+`/v1/auth/login`, then reads the account's `playlistCode` from `/v1/profile`, and
+stores that code through the same store-and-swap path a typed-in code uses. So
+the playlist code stays the only stored credential and everything downstream is
+unchanged; the user simply never has to type a code.
+
+- **The password is never persisted.** It lives for one request, is sent only to
+  AdoboTV, and is never logged, stored, or echoed in a response. Only the
+  playlist code obtained from the profile is kept.
+- **A wrong username and a wrong password are reported identically**
+  (`401 invalid_credentials`), because AdoboTV returns one `401` for both to
+  prevent account enumeration — and AdoboFlix preserves that.
+- **A reCAPTCHA demand is its own, distinct message** (`403 captcha_required`):
+  if the AdoboTV server requires a captcha AdoboFlix cannot supply, the user is
+  told so rather than being told their (correct) password was wrong.
+- **A code still enters directly.** A user with a playlist code and no dashboard
+  account keeps the playlist-code field, offered as a secondary option on the
+  login form.
+
+`ADOBOFLIX_ADOBOTV_BASE_URL` is required for this path too — it is the AdoboTV
+server the login is made against.
 
 ### Importing a playlist
 
@@ -210,6 +237,7 @@ All routes are served under `/api/v1` on the app's own origin.
 | GET | `/api/v1/channels/:id/epg` | EPG entries for a channel |
 | POST | `/api/v1/channels/scan` | **Not implemented** — currently returns `501 Not Implemented` |
 | GET | `/api/v1/source/status` | Active source, its origin (env/stored/none), whether it is a dev harness, and the configured state of each mode (never the code) |
+| POST | `/api/v1/source/login` | Log in to AdoboTV with a username/password, read the account's playlist code, and store it. The password is used for this one request and never persisted |
 | POST | `/api/v1/source/playlist-code` | Validate a playlist code against the source, then persist it, select the login mode, and swap it in |
 | DELETE | `/api/v1/source/playlist-code` | Clear the stored playlist code |
 | POST | `/api/v1/source/playlist-file` | Validate a playlist (JSON or M3U), then persist it, select the file mode, and swap it in |
