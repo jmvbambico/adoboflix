@@ -130,14 +130,28 @@ export function usePlaylistCodeController() {
 
   // The password must never enter React Query's mutation state: a Mutation
   // record keeps its variables in the cache until garbage collection, outliving
-  // the request. Hold the secret in a ref that only the mutation function reads
-  // and let the mutation's variables carry the username alone.
-  const secretRef = useRef<string | null>(null);
+  // the request. It must also not live in one shared slot, because two logins in
+  // flight would race for it and a request could pair one call's username with
+  // another's password. So the secret is keyed per call — the variables carry
+  // the username and a per-call id, and the password is parked under that id in
+  // a map only the mutation function reads.
+  const secrets = useRef(new Map<string, string>());
+  // A monotonic counter keys those secrets. Unique within this hook instance —
+  // the only place the map is read — and deterministic, so a test can read an
+  // id off a mutation record without relying on a runtime crypto API.
+  const nextSecretId = useRef(0);
 
-  const login = useMutation<SourceStatus, unknown, string>({
-    mutationFn: (username: string) => loginToAdoboTV(username, secretRef.current ?? ""),
+  const login = useMutation<SourceStatus, unknown, { id: string; username: string }>({
+    mutationFn: ({ id, username }) => loginToAdoboTV(username, secrets.current.get(id) ?? ""),
     onSuccess: handleConnected,
     onError: onConnectFailed,
+    // Declared here, in the options object, NOT passed to mutate(): React Query
+    // drops a mutate()-level callback when the observer unmounts before the
+    // request settles, so a per-call clear would leave the secret in the map for
+    // good. The options-level callbacks run on every settle path regardless.
+    onSettled: (_data, _error, variables) => {
+      secrets.current.delete(variables.id);
+    },
   });
 
   const clear = useMutation<SourceStatus, unknown, void>({
@@ -166,19 +180,22 @@ export function usePlaylistCodeController() {
   );
 
   // submitLogin keeps the password out of React Query entirely: the secret is
-  // held in a ref, set just before the mutation runs and nulled when it settles.
-  // Resetting the observer on settle was not enough — reset() drops no
-  // variables, and the Mutation record keeps them in the cache until collection.
+  // parked in the ref map under a per-call id and dropped by the mutation's
+  // options-level onSettled when it settles — even if this component unmounted
+  // first. Resetting the observer on settle was not enough — reset() drops no
+  // variables, and the Mutation record keeps them in the cache until collection —
+  // and a single shared slot let two in-flight logins overwrite one another.
   const submitLogin = useCallback(
     (username: string, password: string, onConnected?: () => void) => {
-      secretRef.current = password;
-      login.mutate(username, {
-        onSuccess: () => onConnected?.(),
-        onSettled: () => {
-          secretRef.current = null;
-          login.reset();
+      const id = String(nextSecretId.current++);
+      secrets.current.set(id, password);
+      login.mutate(
+        { id, username },
+        {
+          onSuccess: () => onConnected?.(),
+          onSettled: () => login.reset(),
         },
-      });
+      );
     },
     [login],
   );

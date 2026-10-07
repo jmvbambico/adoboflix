@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { ApiError, type SourceStatus } from "../api/client";
 import PlaylistCodeGate from "./PlaylistCodeGate";
-import { SOURCE_STATUS_QUERY_KEY } from "./playlistCode";
+import { SOURCE_STATUS_QUERY_KEY, usePlaylistCodeController } from "./playlistCode";
 
 // A minimal Response the component's api layer can consume. Avoids depending on
 // a global Response being present in the jsdom environment.
@@ -15,6 +15,57 @@ function makeResponse(status: number, body: unknown): Response {
     text: async () => text,
     json: async () => JSON.parse(text) as unknown,
   } as Response;
+}
+
+// A promise whose settlement a test controls, so a request can be held in flight
+// while the component is unmounted or a second request is fired.
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+// The status body for an active, code-needing, unconfigured source. Used by the
+// login tests that stub fetch for themselves rather than through installBackend.
+function activeStatusBody() {
+  return {
+    source: "adobotv-http",
+    active: true,
+    origin: "stored",
+    dev: false,
+    needs_playlist_code: true,
+    playlist_code_configured: false,
+    playlist_file_configured: false,
+    modes: [
+      {
+        name: "adobotv-http",
+        selectable: true,
+        dev: false,
+        active: true,
+        configured: false,
+        needs_playlist_code: true,
+      },
+      {
+        name: "file",
+        selectable: true,
+        dev: false,
+        active: false,
+        configured: false,
+        needs_playlist_code: false,
+      },
+    ],
+  };
+}
+
+// The UI disables its Connect button while a login is pending, so a concurrent
+// login is only reachable by calling the controller directly. This harness
+// mounts it and hands the test the live submitLogin.
+let capturedController: ReturnType<typeof usePlaylistCodeController> | null = null;
+function ControllerHarness() {
+  capturedController = usePlaylistCodeController();
+  return null;
 }
 
 interface FetchCall {
@@ -681,5 +732,142 @@ describe("PlaylistCodeGate — login by username and password", () => {
     // Negative: the password never entered React Query's mutation state, so it
     // cannot survive the request in the cache.
     expect(serializedVariables).not.toContain(CACHE_PASSWORD);
+  });
+
+  // Hole 1: a mutate()-level onSettled is dropped when the observer unmounts
+  // before the request settles, so a password cleared only there survives the
+  // request. This drives a real login, unmounts mid-flight, lets it settle, then
+  // probes the controller's retained secret store through the mutation's own
+  // mutationFn — the only handle left on that store once the component is gone.
+  it("clears the password when the gate unmounts before the login settles", async () => {
+    const UNMOUNT_PASSWORD = "wJ7q-unmount-canary-2c4d";
+    const loginReply = deferred<Response>();
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body = typeof init?.body === "string" ? init.body : null;
+        calls.push({ url, method, body });
+        if (url.endsWith(STATUS_URL)) return makeResponse(200, activeStatusBody());
+        if (method === "POST" && url.endsWith(LOGIN_URL)) return loginReply.promise;
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    const queryClient = makeQueryClient();
+    const { unmount } = renderGateWith(queryClient);
+
+    const password = await screen.findByLabelText("AdoboTV password");
+    fireEvent.change(screen.getByLabelText("AdoboTV username"), { target: { value: USERNAME } });
+    fireEvent.change(password, { target: { value: UNMOUNT_PASSWORD } });
+    fireEvent.click(screen.getByRole("button", { name: /^connect$/i }));
+
+    const loginBodies = () =>
+      calls
+        .filter((c) => c.method === "POST" && c.url.endsWith(LOGIN_URL))
+        .map((c) => c.body ?? "");
+
+    // Positive: the mutation is genuinely in flight, and the real POST carried
+    // the password, so the secret was in the store at submission time.
+    await waitFor(() => expect(loginBodies()).toHaveLength(1));
+    const loginMutations = queryClient
+      .getMutationCache()
+      .getAll()
+      .filter((mutation) => mutation.state.status === "pending");
+    expect(loginMutations).toHaveLength(1);
+    const loginMutation = loginMutations[0];
+    const variables = loginMutation.state.variables as { id: string; username: string };
+    expect(variables.username).toBe(USERNAME);
+    expect(loginBodies().at(-1)).toContain(UNMOUNT_PASSWORD);
+
+    // Probe the retained secret store before settle: re-issuing through the
+    // mutation's own mutationFn reads the same store, and the fresh send still
+    // carries the password — proving the store held it and this probe sees it.
+    const sendLoginSecret = loginMutation.options.mutationFn as (v: unknown) => unknown;
+    sendLoginSecret(variables);
+    expect(loginBodies().at(-1)).toContain(UNMOUNT_PASSWORD);
+
+    // Unmount mid-flight, then let the request settle.
+    unmount();
+    loginReply.resolve(makeResponse(200, {}));
+    await waitFor(() => expect(loginMutation.state.status).not.toBe("pending"));
+
+    // Negative: the retained store no longer yields the password — a fresh send
+    // through the same mutationFn now carries an empty secret.
+    sendLoginSecret(variables);
+    expect(loginBodies().at(-1)).not.toContain(UNMOUNT_PASSWORD);
+
+    // Negative: and it never entered React Query's mutation variables, which
+    // outlive the request.
+    const serializedVariables = queryClient
+      .getMutationCache()
+      .getAll()
+      .map((mutation) => JSON.stringify(mutation.state.variables))
+      .join("\n");
+    expect(serializedVariables).toContain(USERNAME);
+    expect(serializedVariables).not.toContain(UNMOUNT_PASSWORD);
+  });
+
+  // Hole 2: one shared secret slot races across concurrent logins. Both calls
+  // park their password in the same place before either mutation function runs,
+  // so a request can read the other call's password. This fires two logins
+  // before either settles and checks the outgoing pairs directly.
+  it("keeps concurrent logins on their own secret, never crossing credentials", async () => {
+    const alice = { username: "alice-concurrent", password: "alice-pw-1A" };
+    const bob = { username: "bob-concurrent", password: "bob-pw-2B" };
+    const pendingLogins: Array<(response: Response) => void> = [];
+    const calls: FetchCall[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        const body = typeof init?.body === "string" ? init.body : null;
+        calls.push({ url, method, body });
+        if (url.endsWith(STATUS_URL)) return makeResponse(200, activeStatusBody());
+        if (method === "POST" && url.endsWith(LOGIN_URL)) {
+          return new Promise<Response>((resolve) => {
+            pendingLogins.push(resolve);
+          });
+        }
+        throw new Error(`unexpected fetch: ${method} ${url}`);
+      }),
+    );
+
+    const queryClient = makeQueryClient();
+    capturedController = null;
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ControllerHarness />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(capturedController).not.toBeNull());
+    await waitFor(() => expect(queryClient.getQueryData(SOURCE_STATUS_QUERY_KEY)).toBeDefined());
+
+    // Fire both before either resolves, as two rapid submits would.
+    capturedController!.submitLogin(alice.username, alice.password);
+    capturedController!.submitLogin(bob.username, bob.password);
+
+    const loginBodies = () =>
+      calls
+        .filter((c) => c.method === "POST" && c.url.endsWith(LOGIN_URL))
+        .map((c) => JSON.parse(c.body ?? "{}") as { username: string; password: string });
+    await waitFor(() => expect(loginBodies()).toHaveLength(2));
+
+    const bodies = loginBodies();
+    // Positive: both distinct usernames actually went out, so the pairing below
+    // is a real match and not an accidental pass on an absent entry.
+    expect(bodies.map((b) => b.username).sort()).toEqual(
+      [alice.username, bob.username].sort(),
+    );
+    // Negative: each username carries its own password, never the other call's.
+    expect(bodies.find((b) => b.username === alice.username)?.password).toBe(alice.password);
+    expect(bodies.find((b) => b.username === bob.username)?.password).toBe(bob.password);
+
+    // Let both settle so no request is left pending.
+    pendingLogins.forEach((resolve) => resolve(makeResponse(200, {})));
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
   });
 });
