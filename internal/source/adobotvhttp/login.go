@@ -85,9 +85,11 @@ func NewLoginClientFromEnv() (*LoginClient, error) {
 // A 401 becomes ErrInvalidCredentials, deliberately without saying whether the
 // username or the password was wrong. A 403 whose body names reCAPTCHA becomes
 // ErrRecaptchaRequired — a gate AdoboFlix cannot clear and must not report as a
-// bad password. A successful login whose profile carries no playlist code
-// becomes ErrProfileWithoutPlaylistCode, so an empty credential is never
-// stored. Everything else is ErrUpstream.
+// bad password. A 200 whose envelope asserts success: false is a well-formed
+// upstream refusal and becomes ErrUpstream, not a credential rejection. A
+// successful login whose profile carries no playlist code becomes
+// ErrProfileWithoutPlaylistCode, so an empty credential is never stored.
+// Everything else is ErrUpstream.
 func (c *LoginClient) Login(ctx context.Context, username, password string) (string, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
@@ -115,6 +117,12 @@ func (c *LoginClient) Login(ctx context.Context, username, password string) (str
 // authenticate performs POST /v1/auth/login and returns the access token.
 // recaptchaToken is always empty: AdoboFlix cannot mint one, so when AdoboTV
 // demands it that is surfaced as ErrRecaptchaRequired rather than retried.
+//
+// The 200 envelope's success field is an explicit refusal signal: success: false
+// with an otherwise valid-looking token is a failed login. It is read as *bool
+// because AdoboTV's live shape is unverified: an ABSENT field means "not
+// asserted" and proceeds (a plain bool would read absent as false and reject
+// every real login), while a PRESENT false rejects.
 func (c *LoginClient) authenticate(ctx context.Context, username, password string) (string, error) {
 	payload, err := json.Marshal(struct {
 		Username       string `json:"username"`
@@ -135,13 +143,19 @@ func (c *LoginClient) authenticate(ctx context.Context, username, password strin
 	switch status {
 	case http.StatusOK:
 		var envelope struct {
-			Success bool `json:"success"`
+			Success *bool `json:"success"`
 			Data    struct {
 				AccessToken string `json:"access_token"`
 			} `json:"data"`
 		}
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			return "", fmt.Errorf("%w: login response was not the expected JSON", ErrUpstream)
+		}
+		if envelope.Success != nil && !*envelope.Success {
+			// A well-formed envelope that declines the login. This is not the
+			// documented credential refusal (that is the 401 above), so it must
+			// not be relabelled ErrInvalidCredentials.
+			return "", fmt.Errorf("%w: login response declared success: false", ErrUpstream)
 		}
 		if strings.TrimSpace(envelope.Data.AccessToken) == "" {
 			return "", fmt.Errorf("%w: login response carried no access token", ErrUpstream)
@@ -166,6 +180,11 @@ func (c *LoginClient) authenticate(ctx context.Context, username, password strin
 // the playlistCode field. A missing field is not an error here — the caller
 // decides that an empty code is ErrProfileWithoutPlaylistCode — so a present
 // but empty field and an absent one are treated the same.
+//
+// Like the login envelope, a profile that asserts success: false is a
+// well-formed refusal and becomes ErrUpstream; its playlistCode must never
+// reach the caller as a usable code. The field is read as *bool so an ABSENT
+// success proceeds while a PRESENT false rejects.
 func (c *LoginClient) profilePlaylistCode(ctx context.Context, token string) (string, error) {
 	status, body, err := c.do(ctx, http.MethodGet, profilePath, nil, token)
 	if err != nil {
@@ -176,12 +195,16 @@ func (c *LoginClient) profilePlaylistCode(ctx context.Context, token string) (st
 	}
 
 	var envelope struct {
-		Data struct {
+		Success *bool `json:"success"`
+		Data    struct {
 			PlaylistCode string `json:"playlistCode"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil {
 		return "", fmt.Errorf("%w: profile response was not the expected JSON", ErrUpstream)
+	}
+	if envelope.Success != nil && !*envelope.Success {
+		return "", fmt.Errorf("%w: profile response declared success: false", ErrUpstream)
 	}
 	return envelope.Data.PlaylistCode, nil
 }

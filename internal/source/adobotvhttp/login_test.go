@@ -209,3 +209,147 @@ func TestLoginTransportFailureIsUpstream(t *testing.T) {
 		t.Errorf("the error leaked the password: %v", err)
 	}
 }
+
+// rawLoginServer serves caller-supplied JSON bodies for the two login
+// endpoints, so a test can control the exact presence and value of the
+// `success` field. The loginServer above always emits success:true and cannot
+// express the absent-success shape this fix turns on.
+type rawLoginServer struct {
+	loginBody   string
+	profileBody string
+}
+
+func (s *rawLoginServer) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/login":
+			_, _ = io.WriteString(w, s.loginBody)
+		case "/v1/profile":
+			_, _ = io.WriteString(w, s.profileBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestLoginSuccessField covers the 200 login envelope's success field. A
+// PRESENT success:false must fail as ErrUpstream even when a valid-looking
+// token rides along; an ABSENT success must still succeed, because AdoboTV's
+// live shape is unverified and absent currently means "not asserted".
+func TestLoginSuccessField(t *testing.T) {
+	const okProfile = `{"success":true,"data":{"playlistCode":"CODE-X"}}`
+
+	cases := []struct {
+		name    string
+		login   string
+		wantErr error
+		wantOK  bool
+	}{
+		{
+			name:    "success false with a token is rejected as upstream, not invalid credentials",
+			login:   `{"success":false,"data":{"access_token":"tok-abc"}}`,
+			wantErr: ErrUpstream,
+		},
+		{
+			name:   "success true with a token succeeds",
+			login:  `{"success":true,"data":{"access_token":"tok-abc"}}`,
+			wantOK: true,
+		},
+		{
+			name:   "absent success with a token succeeds",
+			login:  `{"data":{"access_token":"tok-abc"}}`,
+			wantOK: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := (&rawLoginServer{loginBody: tc.login, profileBody: okProfile}).server(t)
+			client := NewLoginClient(srv.URL, srv.Client())
+
+			code, err := client.Login(context.Background(), "alice", "hunter2")
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("Login: %v, want success", err)
+				}
+				if code != "CODE-X" {
+					t.Errorf("code = %q, want %q", code, "CODE-X")
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			// A declined envelope must not be relabelled as a credential refusal.
+			if errors.Is(err, ErrInvalidCredentials) {
+				t.Errorf("error = %v, must not be ErrInvalidCredentials", err)
+			}
+			if code != "" {
+				t.Errorf("code = %q, want empty on failure", code)
+			}
+			// Neither the password nor the token from the refused body may leak.
+			if strings.Contains(err.Error(), "hunter2") {
+				t.Errorf("the error leaked the password: %v", err)
+			}
+			if strings.Contains(err.Error(), "tok-abc") {
+				t.Errorf("the error leaked the access token: %v", err)
+			}
+		})
+	}
+}
+
+// TestLoginProfileSuccessField covers the 200 profile envelope's success field:
+// a PRESENT success:false must fail as ErrUpstream and the playlistCode it
+// carries must never reach the caller; an ABSENT success must still succeed.
+func TestLoginProfileSuccessField(t *testing.T) {
+	const okLogin = `{"success":true,"data":{"access_token":"tok-abc"}}`
+
+	cases := []struct {
+		name    string
+		profile string
+		wantErr error
+		wantOK  bool
+	}{
+		{
+			name:    "success false carrying a playlistCode is rejected and the code is withheld",
+			profile: `{"success":false,"data":{"playlistCode":"SECRET-CODE"}}`,
+			wantErr: ErrUpstream,
+		},
+		{
+			name:    "absent success with a playlistCode succeeds",
+			profile: `{"data":{"playlistCode":"CODE-Y"}}`,
+			wantOK:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := (&rawLoginServer{loginBody: okLogin, profileBody: tc.profile}).server(t)
+			client := NewLoginClient(srv.URL, srv.Client())
+
+			code, err := client.Login(context.Background(), "alice", "hunter2")
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("Login: %v, want success", err)
+				}
+				if code != "CODE-Y" {
+					t.Errorf("code = %q, want %q", code, "CODE-Y")
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("error = %v, want %v", err, tc.wantErr)
+			}
+			if code != "" {
+				t.Errorf("code = %q, want empty: a declined profile must not yield a usable code", code)
+			}
+			if strings.Contains(err.Error(), "SECRET-CODE") {
+				t.Errorf("the error leaked the playlist code from the body: %v", err)
+			}
+		})
+	}
+}
