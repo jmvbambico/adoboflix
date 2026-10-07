@@ -158,6 +158,9 @@ function renderGate(errors?: unknown[]) {
 const SECRET = "SUPER-SECRET-PLAYLIST-CODE";
 const PASSWORD = "SUPER-SECRET-PASSWORD";
 const USERNAME = "alice";
+// A password distinctive enough that finding it anywhere is unambiguous, used
+// by the mutation-cache test below.
+const CACHE_PASSWORD = "wJ7q-canary-9f3e1a2b";
 
 // The code form is the secondary path now, so a test that exercises it first
 // switches off the default username/password form.
@@ -647,5 +650,36 @@ describe("PlaylistCodeGate — login by username and password", () => {
       await screen.findByRole("heading", { name: "This AdoboTV account has no playlist code" }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText("AdoboTV username")).toBeInTheDocument();
+  });
+
+  // The gate clears the password from its own form state on submit, but the
+  // controller's old variables form handed the secret to React Query, whose
+  // Mutation record keeps its variables in the cache until garbage collection —
+  // so the password outlived the request one layer down. This drives a login and
+  // proves the password never entered that cache.
+  it("keeps the password out of React Query's mutation cache", async () => {
+    const backend = installBackend();
+    const { queryClient } = renderGate();
+
+    await submitCredentials(USERNAME, CACHE_PASSWORD);
+    await waitFor(() => expect(backend.calls.some((c) => c.method === "POST")).toBe(true));
+    await waitFor(() => expect(screen.queryByLabelText("AdoboTV username")).not.toBeInTheDocument());
+
+    // Positive: the password really was sent, so the cache absence below measures
+    // where the secret is held and not an unused value.
+    const post = backend.calls.find((c) => c.method === "POST");
+    expect(post?.body).toContain(CACHE_PASSWORD);
+
+    const mutations = queryClient.getMutationCache().getAll();
+    // Positive: the record we inspect exists and its variables are populated —
+    // the username is findable in them — so the absence check is not vacuous.
+    expect(mutations.length).toBeGreaterThanOrEqual(1);
+    const serializedVariables = mutations
+      .map((mutation) => JSON.stringify(mutation.state.variables))
+      .join("\n");
+    expect(serializedVariables).toContain(USERNAME);
+    // Negative: the password never entered React Query's mutation state, so it
+    // cannot survive the request in the cache.
+    expect(serializedVariables).not.toContain(CACHE_PASSWORD);
   });
 });

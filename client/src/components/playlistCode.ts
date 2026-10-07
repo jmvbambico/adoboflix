@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   clearPlaylistCode,
@@ -72,14 +72,6 @@ export type PlaylistCodeOutcome =
   | { kind: "failed"; copy: SourceStatusCopy }
   | null;
 
-// AdoboTVCredentials is the username/password a user signs in with. The password
-// is held only long enough to send it: the controller resets the mutation the
-// moment it settles, so the value does not linger in React Query state.
-export interface AdoboTVCredentials {
-  username: string;
-  password: string;
-}
-
 // usePlaylistCodeController owns the status query and the connect mutations —
 // submitting a playlist code, or logging in with a username and password — plus
 // the subtle "the server kept the credential" branch and the optimistic
@@ -136,8 +128,14 @@ export function usePlaylistCodeController() {
     onError: onConnectFailed,
   });
 
-  const login = useMutation<SourceStatus, unknown, AdoboTVCredentials>({
-    mutationFn: ({ username, password }) => loginToAdoboTV(username, password),
+  // The password must never enter React Query's mutation state: a Mutation
+  // record keeps its variables in the cache until garbage collection, outliving
+  // the request. Hold the secret in a ref that only the mutation function reads
+  // and let the mutation's variables carry the username alone.
+  const secretRef = useRef<string | null>(null);
+
+  const login = useMutation<SourceStatus, unknown, string>({
+    mutationFn: (username: string) => loginToAdoboTV(username, secretRef.current ?? ""),
     onSuccess: handleConnected,
     onError: onConnectFailed,
   });
@@ -167,18 +165,20 @@ export function usePlaylistCodeController() {
     [submit],
   );
 
-  // submitLogin does the same for the password: resetting on settle drops the
-  // credentials from React Query's retained mutation state the instant the
-  // request finishes, so the password survives only for the request itself.
+  // submitLogin keeps the password out of React Query entirely: the secret is
+  // held in a ref, set just before the mutation runs and nulled when it settles.
+  // Resetting the observer on settle was not enough — reset() drops no
+  // variables, and the Mutation record keeps them in the cache until collection.
   const submitLogin = useCallback(
     (username: string, password: string, onConnected?: () => void) => {
-      login.mutate(
-        { username, password },
-        {
-          onSuccess: () => onConnected?.(),
-          onSettled: () => login.reset(),
+      secretRef.current = password;
+      login.mutate(username, {
+        onSuccess: () => onConnected?.(),
+        onSettled: () => {
+          secretRef.current = null;
+          login.reset();
         },
-      );
+      });
     },
     [login],
   );
